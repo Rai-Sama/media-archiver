@@ -4,10 +4,19 @@ from pathlib import Path
 import os
 import urllib.parse
 import json
+import hashlib
+import subprocess
+from PIL import Image, ImageOps
 
 app = Flask(__name__)
 
-DB_PATH = Path.home() / "everything/personal/backup/media_index.db"
+# --- Directory Setup ---
+BASE_DIR = Path.home() / "everything/personal/backup"
+DB_PATH = BASE_DIR / "media_index.db"
+THUMB_DIR = BASE_DIR / ".thumbnails"
+
+# Ensure the hidden cache directory exists
+THUMB_DIR.mkdir(parents=True, exist_ok=True)
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -34,11 +43,10 @@ HTML_TEMPLATE = """
         .checkbox-group label { cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 0.9em; }
         
         button { cursor: pointer; background: #007bff; color: white; padding: 10px 20px; font-weight: bold; border: none; border-radius: 6px; height: 40px; box-sizing: border-box;}
-        button:hover { background: #0056b3; }
+        button:hover:not(:disabled) { background: #0056b3; }
         .clear-btn { padding: 10px 15px; background: #444; color: white; text-decoration: none; border-radius: 6px; font-size: 0.9em; height: 40px; box-sizing: border-box; display: flex; align-items: center; justify-content: center;}
         .clear-btn:hover { background: #555; }
 
-        /* --- CUSTOM AUTOCOMPLETE CSS --- */
         .input-group { display: flex; flex-direction: column; }
         .autocomplete-wrapper { position: relative; }
         .autocomplete-dropdown {
@@ -50,10 +58,7 @@ HTML_TEMPLATE = """
         .autocomplete-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #333; word-break: break-all; color: #fff; font-size: 0.9em;}
         .autocomplete-item:hover { background-color: #007bff; }
         .autocomplete-item:last-child { border-bottom: none; }
-        
-        /* Spinner for loading state */
         .loading-spinner { display: none; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #888; font-size: 0.8em; pointer-events: none; }
-        /* ------------------------------- */
         
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 15px; }
         .card { background: #1e1e1e; border-radius: 8px; overflow: hidden; border: 1px solid #333; transition: transform 0.1s; }
@@ -63,10 +68,10 @@ HTML_TEMPLATE = """
             height: 200px; width: 100%; background: #0b0b0b; display: flex; align-items: center; justify-content: center; overflow: hidden;
             cursor: pointer; position: relative;
         }
-        .media-container img, .media-container video { 
+        .media-container img { 
             width: 100%; height: 100%; object-fit: cover; pointer-events: none; transition: transform 0.2s; 
         }
-        .media-container:hover img, .media-container:hover video { transform: scale(1.03); opacity: 0.8; }
+        .media-container:hover img { transform: scale(1.03); opacity: 0.8; }
         .play-icon { position: absolute; font-size: 3em; color: rgba(255, 255, 255, 0.7); pointer-events: none; }
 
         .info { padding: 12px; font-size: 0.85em; color: #ccc; line-height: 1.5; }
@@ -74,6 +79,12 @@ HTML_TEMPLATE = """
         .badge.src-me { background: #1e4b35; color: #a3e4c4; }
         .badge.src-shared { background: #4b351e; color: #e4c4a3; }
         .badge.src-misc { background: #351e4b; color: #c4a3e4; }
+
+        .pagination { display: flex; justify-content: center; align-items: center; gap: 15px; margin-top: 30px; padding-bottom: 20px; }
+        .page-btn { padding: 10px 20px; background: #2a2a2a; color: #fff; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .page-btn:hover:not(:disabled) { background: #007bff; border-color: #007bff; }
+        .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .page-info { color: #aaa; font-size: 0.9em; font-family: monospace; }
 
         .modal { 
             display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; 
@@ -135,7 +146,6 @@ HTML_TEMPLATE = """
             </div>
             
             <div class="filter-row">
-                
                 <div class="input-group">
                     <span class="filter-label">File Name</span>
                     <div class="autocomplete-wrapper">
@@ -173,9 +183,9 @@ HTML_TEMPLATE = """
         <div class="card">
             <div class="media-container" onclick="openLightbox({{ loop.index0 }})">
                 {% if item.file_type == 'image' %}
-                    <img src="/file?path={{ item.current_path | urlencode }}" loading="lazy" alt="{{ item.original_name }}">
+                    <img src="/thumbnail?path={{ item.current_path | urlencode }}&type=image" loading="lazy" alt="{{ item.original_name }}">
                 {% elif item.file_type == 'video' %}
-                    <video src="/file?path={{ item.current_path | urlencode }}#t=0.1" preload="metadata"></video>
+                    <img src="/thumbnail?path={{ item.current_path | urlencode }}&type=video" loading="lazy" alt="{{ item.original_name }}">
                     <div class="play-icon">▶</div>
                 {% else %}
                     <div style="color: #666; font-size: 3em;">📄</div>
@@ -196,6 +206,14 @@ HTML_TEMPLATE = """
         {% endfor %}
     </div>
 
+    {% if total_pages > 0 %}
+    <div class="pagination">
+        <button class="page-btn" onclick="changePage({{ page - 1 }})" {% if page <= 1 %}disabled{% endif %}>&#10094; Previous</button>
+        <span class="page-info">Page {{ page }} of {{ total_pages }} ({{ total_count }} items)</span>
+        <button class="page-btn" onclick="changePage({{ page + 1 }})" {% if page >= total_pages %}disabled{% endif %}>Next &#10095;</button>
+    </div>
+    {% endif %}
+
     <div id="lightboxModal" class="modal" onclick="closeLightbox()">
         <span class="counter" id="modalCounter"></span>
         <span class="modal-close">&times;</span>
@@ -206,18 +224,21 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        // --- API-Driven Autocomplete Engine ---
+        function changePage(newPage) {
+            const url = new URL(window.location.href);
+            url.searchParams.set('page', newPage);
+            window.location.href = url.toString();
+        }
+
         function setupApiAutocomplete(inputId, dropdownId, dbColumn) {
             const inputEl = document.getElementById(inputId);
             const dropdownEl = document.getElementById(dropdownId);
             const loaderEl = document.getElementById(inputId.replace('Input', 'Loader'));
-            
-            let timeoutId; // Used for debouncing
+            let timeoutId;
 
             if (!inputEl || !dropdownEl) return;
 
             inputEl.addEventListener("input", function() {
-                // Clear the previous timeout if the user is still typing
                 clearTimeout(timeoutId);
                 const val = this.value.trim();
                 
@@ -227,10 +248,8 @@ HTML_TEMPLATE = """
                     return;
                 }
 
-                // Show a tiny loading spinner in the input box
                 if (loaderEl) loaderEl.style.display = "block";
 
-                // Wait 150ms after the last keystroke before querying the API
                 timeoutId = setTimeout(async () => {
                     try {
                         const response = await fetch(`/api/suggest?column=${dbColumn}&q=${encodeURIComponent(val)}`);
@@ -272,17 +291,16 @@ HTML_TEMPLATE = """
             });
         }
 
-        // Initialize the engine pointing to the exact database columns
         setupApiAutocomplete("filenameInput", "filenameDropdown", "original_name");
         setupApiAutocomplete("cameraInput", "cameraDropdown", "camera_model");
         setupApiAutocomplete("locationInput", "locationDropdown", "location_name");
 
-        // --- Lightbox Engine ---
         const galleryData = [
             {% for item in results %}
             {
                 type: "{{ item.file_type }}",
-                src: "/file?path={{ item.current_path | urlencode }}"
+                // The lightbox still requests the original full resolution /file
+                src: "/file?path={{ item.current_path | urlencode }}" 
             }{% if not loop.last %},{% endif %}
             {% endfor %}
         ];
@@ -345,7 +363,6 @@ HTML_TEMPLATE = """
             }
         });
 
-        // --- Date Engine ---
         const startDateInput = document.querySelector('input[name="start_date"]');
         const endDateInput = document.querySelector('input[name="end_date"]');
 
@@ -390,31 +407,76 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-# --- NEW: Dedicated API Route for Autocomplete ---
 @app.route("/api/suggest")
 def api_suggest():
     column = request.args.get("column")
     query_str = request.args.get("q", "")
-    
-    # Whitelist columns to prevent SQL Injection
     valid_columns = {"original_name", "camera_model", "location_name"}
+    
     if column not in valid_columns or not query_str:
         return jsonify([])
         
     conn = get_db_connection()
-    # Query up to 20 unique matches instantly
     query = f"SELECT DISTINCT {column} FROM media WHERE {column} LIKE ? ORDER BY {column} LIMIT 20"
-    
-    # Use wildcards around the query string to match anywhere in the text
     results = conn.execute(query, (f"%{query_str}%",)).fetchall()
     conn.close()
     
-    # Extract the first element of each row and return as a clean JSON array
     suggestions = [row[0] for row in results if row[0]]
     return jsonify(suggestions)
 
+# --- NEW: On-The-Fly Thumbnail Generator ---
+@app.route("/thumbnail")
+def serve_thumbnail():
+    file_path = request.args.get("path")
+    file_type = request.args.get("type", "image")
+    
+    if not file_path or not os.path.exists(file_path):
+        return "Not found", 404
+        
+    # Generate a unique filename for the cache based on the absolute path
+    path_hash = hashlib.md5(file_path.encode('utf-8')).hexdigest()
+    cache_path = THUMB_DIR / f"{path_hash}.jpg"
+    
+    # 1. If we already made it previously, serve it instantly
+    if cache_path.exists():
+        return send_file(cache_path)
+        
+    # 2. Generate Photo Thumbnail
+    if file_type == "image":
+        try:
+            with Image.open(file_path) as img:
+                # Corrects orientation if the phone took the photo sideways
+                img = ImageOps.exif_transpose(img) 
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                # Resize down to a max bounding box of 400x400
+                img.thumbnail((400, 400))
+                img.save(cache_path, "JPEG", quality=75)
+            return send_file(cache_path)
+        except Exception:
+            return send_file(file_path) # Fallback to original if Pillow fails
+            
+    # 3. Generate Video Thumbnail (Rips the frame at the 0.1 second mark)
+    elif file_type == "video":
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-i", file_path, 
+                "-ss", "00:00:00.100", "-vframes", "1", 
+                "-vf", "scale=400:-1", str(cache_path)
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return send_file(cache_path)
+        except Exception:
+            # Fallback to the original file to prevent a broken image icon
+            return send_file(file_path)
+
 @app.route("/")
 def index():
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
+
     source = request.args.get("source", "")
     start_date = request.args.get("start_date", "")
     end_date = request.args.get("end_date", "")
@@ -426,51 +488,70 @@ def index():
     has_gps = request.args.get("has_gps", "")
     flash = request.args.get("flash", "")
     
-    conn = get_db_connection()
-    
-    # Removed the heavy initial DB queries for unique items
-
-    query = """
-        SELECT original_name, current_path, file_type, source, 
-               date_taken, camera_model, file_size_kb, location_name 
-        FROM media WHERE 1=1
-    """
+    conditions = ""
     params = []
     
     if source:
-        query += " AND source = ?"
+        conditions += " AND source = ?"
         params.append(source)
     if camera:
-        query += " AND camera_model LIKE ?"
+        conditions += " AND camera_model LIKE ?"
         params.append(f"%{camera}%")
     if location:
-        query += " AND location_name LIKE ?"
+        conditions += " AND location_name LIKE ?"
         params.append(f"%{location}%")
         
     if start_date:
-        query += " AND date_taken >= ?"
+        conditions += " AND date_taken >= ?"
         params.append(start_date + " 00:00:00")
     if end_date:
-        query += " AND date_taken <= ?"
+        conditions += " AND date_taken <= ?"
         params.append(end_date + " 23:59:59")
 
     if name:
-        query += " AND original_name LIKE ?"
+        conditions += " AND original_name LIKE ?"
         params.append(f"%{name}%")
     if file_type:
-        query += " AND file_type = ?"
+        conditions += " AND file_type = ?"
         params.append(file_type)
     if has_gps == "1":
-        query += " AND latitude IS NOT NULL"
+        conditions += " AND latitude IS NOT NULL"
     if flash == "1":
-        query += " AND flash_fired = 1"
-        
-    query += " ORDER BY date_taken DESC LIMIT 200"
+        conditions += " AND flash_fired = 1"
+
+    conn = get_db_connection()
     
-    results = conn.execute(query, params).fetchall()
+    count_query = f"SELECT COUNT(*) FROM media WHERE 1=1 {conditions}"
+    total_count = conn.execute(count_query, params).fetchone()[0]
+    
+    per_page = 200
+    total_pages = (total_count + per_page - 1) // per_page
+    
+    if total_pages == 0: total_pages = 1
+    if page < 1: page = 1
+    elif page > total_pages: page = total_pages
+        
+    offset = (page - 1) * per_page
+    
+    data_query = f"""
+        SELECT original_name, current_path, file_type, source, 
+               date_taken, camera_model, file_size_kb, location_name 
+        FROM media WHERE 1=1 {conditions}
+        ORDER BY date_taken DESC LIMIT {per_page} OFFSET ?
+    """
+    
+    params.append(offset)
+    results = conn.execute(data_query, params).fetchall()
+    
     conn.close()
     
-    return render_template_string(HTML_TEMPLATE, results=results)
+    return render_template_string(
+        HTML_TEMPLATE, 
+        results=results, 
+        page=page, 
+        total_pages=total_pages, 
+        total_count=total_count
+    )
 
 @app.route("/file")
 def serve_file():
