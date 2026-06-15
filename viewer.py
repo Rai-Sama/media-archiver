@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 import os
 import urllib.parse
+import json
 
 app = Flask(__name__)
 
@@ -19,41 +20,52 @@ HTML_TEMPLATE = """
         h2 { margin-top: 0; color: #fff; }
         
         .search-form { display: flex; flex-direction: column; gap: 15px; }
-        .filter-row { display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
+        .filter-row { display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-end; }
         .filter-label { font-size: 0.85em; color: #aaa; margin-bottom: 4px; display: block; text-transform: uppercase; letter-spacing: 0.5px; }
         
+        /* Removed the global width: 100% that was causing the ballooning */
         input[type="text"], input[type="date"], select { 
             padding: 10px; background: #2a2a2a; color: white; border: 1px solid #444; border-radius: 6px; outline: none; min-width: 150px;
+            box-sizing: border-box;
         }
         input:focus, select:focus { border-color: #007bff; }
+        input::-webkit-calendar-picker-indicator { opacity: 1; cursor: pointer; filter: invert(0.8); }
         
-        .checkbox-group { display: flex; gap: 15px; background: #2a2a2a; padding: 10px 15px; border-radius: 6px; border: 1px solid #444; }
+        .checkbox-group { display: flex; gap: 15px; background: #2a2a2a; padding: 10px 15px; border-radius: 6px; border: 1px solid #444; height: 40px; box-sizing: border-box;}
         .checkbox-group label { cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 0.9em; }
         
-        button { cursor: pointer; background: #007bff; color: white; padding: 10px 20px; font-weight: bold; border: none; border-radius: 6px; }
+        button { cursor: pointer; background: #007bff; color: white; padding: 10px 20px; font-weight: bold; border: none; border-radius: 6px; height: 40px; box-sizing: border-box;}
         button:hover { background: #0056b3; }
-        .clear-btn { padding: 10px 15px; background: #444; color: white; text-decoration: none; border-radius: 6px; font-size: 0.9em; }
+        .clear-btn { padding: 10px 15px; background: #444; color: white; text-decoration: none; border-radius: 6px; font-size: 0.9em; height: 40px; box-sizing: border-box; display: flex; align-items: center; justify-content: center;}
         .clear-btn:hover { background: #555; }
+
+        /* --- CUSTOM AUTOCOMPLETE CSS --- */
+        .input-group { display: flex; flex-direction: column; }
+        .autocomplete-wrapper { position: relative; }
+        .autocomplete-dropdown {
+            position: absolute; top: 100%; left: 0; z-index: 999;
+            width: max-content; min-width: 100%; max-width: 400px; max-height: 250px; overflow-y: auto;
+            background-color: #2a2a2a; border: 1px solid #444; border-radius: 4px; 
+            box-shadow: 0 8px 16px rgba(0,0,0,0.8); display: none; margin-top: 4px;
+        }
+        .autocomplete-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #333; word-break: break-all; color: #fff; font-size: 0.9em;}
+        .autocomplete-item:hover { background-color: #007bff; }
+        .autocomplete-item:last-child { border-bottom: none; }
+        /* ------------------------------- */
         
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 15px; }
         .card { background: #1e1e1e; border-radius: 8px; overflow: hidden; border: 1px solid #333; transition: transform 0.1s; }
         .card:hover { border-color: #555; }
         
-        /* Turn the entire container into a clickable button */
         .media-container { 
             height: 200px; width: 100%; background: #0b0b0b; display: flex; align-items: center; justify-content: center; overflow: hidden;
             cursor: pointer; position: relative;
         }
-        /* Make the inner media ignore mouse events so the container registers the click */
         .media-container img, .media-container video { 
             width: 100%; height: 100%; object-fit: cover; pointer-events: none; transition: transform 0.2s; 
         }
         .media-container:hover img, .media-container:hover video { transform: scale(1.03); opacity: 0.8; }
-        
-        /* Play Icon Overlay for Videos in Grid */
-        .play-icon {
-            position: absolute; font-size: 3em; color: rgba(255, 255, 255, 0.7); pointer-events: none;
-        }
+        .play-icon { position: absolute; font-size: 3em; color: rgba(255, 255, 255, 0.7); pointer-events: none; }
 
         .info { padding: 12px; font-size: 0.85em; color: #ccc; line-height: 1.5; }
         .badge { display: inline-block; padding: 2px 6px; background: #333; border-radius: 4px; font-size: 0.8em; margin-bottom: 6px; font-weight: bold; }
@@ -61,60 +73,75 @@ HTML_TEMPLATE = """
         .badge.src-shared { background: #4b351e; color: #e4c4a3; }
         .badge.src-misc { background: #351e4b; color: #c4a3e4; }
 
-        /* Advanced Modal / Lightbox Styles */
         .modal { 
             display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; 
             background-color: rgba(0,0,0,0.95); justify-content: center; align-items: center; backdrop-filter: blur(5px);
         }
         .modal-content { max-width: 90%; max-height: 90vh; object-fit: contain; border-radius: 4px; box-shadow: 0 4px 25px rgba(0,0,0,0.8); display: none; }
-        
-        /* Navigation Controls */
         .modal-close { position: absolute; top: 20px; right: 30px; color: #fff; font-size: 40px; font-weight: bold; cursor: pointer; user-select: none; z-index: 1001; }
         .nav-btn { position: absolute; top: 50%; transform: translateY(-50%); color: #fff; font-size: 50px; cursor: pointer; user-select: none; padding: 20px; z-index: 1001; transition: 0.2s; }
         .nav-btn:hover { color: #007bff; }
         .prev-btn { left: 10px; }
         .next-btn { right: 10px; }
-        
         .counter { position: absolute; top: 25px; left: 30px; color: #aaa; font-size: 1.2em; font-family: monospace; }
     </style>
 </head>
 <body>
+
     <div class="header-container">
         <h2>📷 Media Archive Search</h2>
         <form class="search-form" method="GET" action="/">
+            
             <div class="filter-row">
-                <div>
+                <div class="input-group">
                     <span class="filter-label">Primary Source</span>
                     <select name="source">
                         <option value="">All Sources</option>
-                        <option value="me" {% if request.args.get('source') == 'me' %}selected{% endif %}>My Camera (me)</option>
+                        <option value="me" {% if request.args.get('source') == 'me' %}selected{% endif %}>My Camera</option>
                         <option value="shared" {% if request.args.get('source') == 'shared' %}selected{% endif %}>Shared</option>
-                        <option value="misc" {% if request.args.get('source') == 'misc' %}selected{% endif %}>Miscellaneous</option>
+                        <option value="misc" {% if request.args.get('source') == 'misc' %}selected{% endif %}>Misc</option>
                     </select>
                 </div>
-                <div>
+                
+                <div class="input-group">
                     <span class="filter-label">Start Date</span>
                     <input type="date" name="start_date" value="{{ request.args.get('start_date', '') }}">
                 </div>
-                <div>
+                
+                <div class="input-group">
                     <span class="filter-label">End Date</span>
                     <input type="date" name="end_date" value="{{ request.args.get('end_date', '') }}">
                 </div>
-                <div>
+                
+                <div class="input-group">
                     <span class="filter-label">Camera Model</span>
-                    <input type="text" name="camera" placeholder="e.g., SM-S911B" value="{{ request.args.get('camera', '') }}">
+                    <div class="autocomplete-wrapper">
+                        <input type="text" id="cameraInput" name="camera" placeholder="e.g., SM-S911B" value="{{ request.args.get('camera', '') }}" autocomplete="off" style="width: 180px;">
+                        <div id="cameraDropdown" class="autocomplete-dropdown"></div>
+                    </div>
                 </div>
-                <div>
+                
+                <div class="input-group">
                     <span class="filter-label">Location</span>
-                    <input type="text" name="location" placeholder="City or State..." value="{{ request.args.get('location', '') }}">
+                    <div class="autocomplete-wrapper">
+                        <input type="text" id="locationInput" name="location" placeholder="City or State..." value="{{ request.args.get('location', '') }}" autocomplete="off" style="width: 200px;">
+                        <div id="locationDropdown" class="autocomplete-dropdown"></div>
+                    </div>
                 </div>
             </div>
             
-            <div class="filter-row" style="margin-top: 5px;">
-                <div>
-                    <input type="text" name="name" placeholder="Filename snippet..." value="{{ request.args.get('name', '') }}">
+            <div class="filter-row">
+                
+                <div class="input-group">
+                    <span class="filter-label">File Name</span>
+                    <div class="autocomplete-wrapper">
+                        <input type="text" id="filenameInput" name="name" placeholder="Exact filename snippet..." value="{{ request.args.get('name', '') }}" autocomplete="off" style="min-width: 200px;">
+                        <div id="filenameDropdown" class="autocomplete-dropdown"></div>
+                    </div>
                 </div>
-                <div>
+
+                <div class="input-group">
+                    <span class="filter-label">File Type</span>
                     <select name="file_type">
                         <option value="">All File Types</option>
                         <option value="image" {% if request.args.get('file_type') == 'image' %}selected{% endif %}>Images Only</option>
@@ -122,14 +149,15 @@ HTML_TEMPLATE = """
                         <option value="document" {% if request.args.get('file_type') == 'document' %}selected{% endif %}>Documents Only</option>
                     </select>
                 </div>
+                
                 <div class="checkbox-group">
-                    <label><input type="checkbox" name="has_gps" value="1" {% if request.args.get('has_gps') == '1' %}checked{% endif %}> 📍 Has GPS Location</label>
-                    <label><input type="checkbox" name="flash" value="1" {% if request.args.get('flash') == '1' %}checked{% endif %}> ⚡ Flash Fired</label>
+                    <label><input type="checkbox" name="has_gps" value="1" {% if request.args.get('has_gps') == '1' %}checked{% endif %}> 📍 GPS</label>
+                    <label><input type="checkbox" name="flash" value="1" {% if request.args.get('flash') == '1' %}checked{% endif %}> ⚡ Flash</label>
                 </div>
                 
-                <div style="flex-grow: 1; display: flex; justify-content: flex-end; gap: 10px;">
+                <div style="display: flex; flex-grow: 1; justify-content: flex-end; gap: 10px;">
                     <a href="/" class="clear-btn">Reset</a>
-                    <button type="submit">Execute Search</button>
+                    <button type="submit">Search</button>
                 </div>
             </div>
         </form>
@@ -166,17 +194,67 @@ HTML_TEMPLATE = """
     <div id="lightboxModal" class="modal" onclick="closeLightbox()">
         <span class="counter" id="modalCounter"></span>
         <span class="modal-close">&times;</span>
-        
         <div class="nav-btn prev-btn" onclick="navigate(-1, event)">&#10094;</div>
-        
         <img class="modal-content" id="modalImg" onclick="event.stopPropagation();">
         <video class="modal-content" id="modalVid" controls onclick="event.stopPropagation();"></video>
-        
         <div class="nav-btn next-btn" onclick="navigate(1, event)">&#10095;</div>
     </div>
 
     <script>
-        // Inject the search results dynamically into a Javascript array
+        // --- Custom Unified Autocomplete Engine ---
+        const uniqueNames = {{ unique_names | tojson | safe }};
+        const uniqueCameras = {{ unique_cameras | tojson | safe }};
+        const uniqueLocations = {{ unique_locations | tojson | safe }};
+
+        function setupAutocomplete(inputId, dropdownId, dataArray) {
+            const inputEl = document.getElementById(inputId);
+            const dropdownEl = document.getElementById(dropdownId);
+
+            if (!inputEl || !dropdownEl) return;
+
+            inputEl.addEventListener("input", function() {
+                const val = this.value.toLowerCase();
+                dropdownEl.innerHTML = ""; 
+                
+                if (!val) {
+                    dropdownEl.style.display = "none";
+                    return;
+                }
+
+                let matchCount = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    if (dataArray[i].toLowerCase().includes(val)) {
+                        const itemDiv = document.createElement("div");
+                        itemDiv.className = "autocomplete-item";
+                        itemDiv.innerText = dataArray[i];
+                        
+                        itemDiv.addEventListener("click", function() {
+                            inputEl.value = this.innerText;
+                            dropdownEl.style.display = "none";
+                        });
+                        
+                        dropdownEl.appendChild(itemDiv);
+                        matchCount++;
+                        
+                        if (matchCount >= 30) break; 
+                    }
+                }
+                
+                dropdownEl.style.display = matchCount > 0 ? "block" : "none";
+            });
+
+            document.addEventListener("click", function (e) {
+                if (e.target !== inputEl && e.target !== dropdownEl) {
+                    dropdownEl.style.display = "none";
+                }
+            });
+        }
+
+        setupAutocomplete("filenameInput", "filenameDropdown", uniqueNames);
+        setupAutocomplete("cameraInput", "cameraDropdown", uniqueCameras);
+        setupAutocomplete("locationInput", "locationDropdown", uniqueLocations);
+
+        // --- Lightbox Engine ---
         const galleryData = [
             {% for item in results %}
             {
@@ -194,16 +272,11 @@ HTML_TEMPLATE = """
 
         function openLightbox(index) {
             if (index < 0 || index >= galleryData.length) return;
-            
-            // Skip documents entirely in gallery view
-            if (galleryData[index].type === 'document') {
-                return;
-            }
+            if (galleryData[index].type === 'document') return;
 
             currentIndex = index;
             const item = galleryData[currentIndex];
 
-            // Reset visibility and pause any playing video
             modalImg.style.display = 'none';
             modalVid.style.display = 'none';
             modalVid.pause();
@@ -214,7 +287,7 @@ HTML_TEMPLATE = """
             } else if (item.type === 'video') {
                 modalVid.src = item.src;
                 modalVid.style.display = 'block';
-                modalVid.play(); // Auto-play video when navigated to
+                modalVid.play();
             }
 
             counter.innerText = `${currentIndex + 1} / ${galleryData.length}`;
@@ -231,23 +304,16 @@ HTML_TEMPLATE = """
         }
 
         function navigate(direction, event) {
-            if (event) event.stopPropagation(); // Prevents background click from closing modal
-            
+            if (event) event.stopPropagation();
             let nextIndex = currentIndex + direction;
-            
-            // Fast-forward past documents if they exist in the sequence
             while (nextIndex >= 0 && nextIndex < galleryData.length && galleryData[nextIndex].type === 'document') {
                 nextIndex += direction;
             }
-            
-            // Loop around the gallery
             if (nextIndex >= galleryData.length) nextIndex = 0;
             if (nextIndex < 0) nextIndex = galleryData.length - 1;
-            
             openLightbox(nextIndex);
         }
 
-        // Listen for Keyboard Events
         document.addEventListener('keydown', function(event) {
             if (modal.style.display === 'flex') {
                 if (event.key === "Escape") closeLightbox();
@@ -255,12 +321,12 @@ HTML_TEMPLATE = """
                 else if (event.key === "ArrowLeft") navigate(-1, null);
             }
         });
-        // --- Date Filter Linking Logic ---
+
+        // --- Date Engine ---
         const startDateInput = document.querySelector('input[name="start_date"]');
         const endDateInput = document.querySelector('input[name="end_date"]');
 
         function updateBounds() {
-            // Keeps the logical min/max bounds so you can't search negative ranges
             if (startDateInput.value) endDateInput.min = startDateInput.value;
             else endDateInput.min = "";
             
@@ -269,7 +335,6 @@ HTML_TEMPLATE = """
         }
 
         startDateInput.addEventListener('change', function() {
-            // Auto-fill the end date if it is currently empty
             if (this.value && !endDateInput.value) {
                 endDateInput.value = this.value;
             }
@@ -277,21 +342,18 @@ HTML_TEMPLATE = """
         });
 
         endDateInput.addEventListener('change', function() {
-            // Auto-fill the start date if it is currently empty
             if (this.value && !startDateInput.value) {
                 startDateInput.value = this.value;
             }
             updateBounds();
         });
         
-        // Run once on page load
         updateBounds();
-   </script>
+    </script>
 </body>
 </html>
 """
 
-# Register custom urlencode filter for the Jinja template
 @app.template_filter('urlencode')
 def urlencode_filter(s):
     if type(s) == 'Markup':
@@ -319,6 +381,11 @@ def index():
     flash = request.args.get("flash", "")
     
     conn = get_db_connection()
+    
+    unique_cameras = [row[0] for row in conn.execute("SELECT DISTINCT camera_model FROM media WHERE camera_model IS NOT NULL ORDER BY camera_model").fetchall()]
+    unique_locations = [row[0] for row in conn.execute("SELECT DISTINCT location_name FROM media WHERE location_name IS NOT NULL ORDER BY location_name").fetchall()]
+    unique_names = [row[0] for row in conn.execute("SELECT DISTINCT original_name FROM media WHERE original_name IS NOT NULL ORDER BY original_name").fetchall()]
+
     query = """
         SELECT original_name, current_path, file_type, source, 
                date_taken, camera_model, file_size_kb, location_name 
@@ -359,7 +426,7 @@ def index():
     results = conn.execute(query, params).fetchall()
     conn.close()
     
-    return render_template_string(HTML_TEMPLATE, results=results)
+    return render_template_string(HTML_TEMPLATE, results=results, unique_cameras=unique_cameras, unique_locations=unique_locations, unique_names=unique_names)
 
 @app.route("/file")
 def serve_file():
