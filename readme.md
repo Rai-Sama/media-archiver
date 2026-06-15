@@ -4,6 +4,10 @@ A lightweight, privacy-focused pipeline built for Linux to locally organize, com
 
 Instead of relying on cloud services, this tool uses a local SQLite database to index deep EXIF and video metadata, allowing for instantaneous queries via a Command Line Interface (CLI) or a lightweight local web UI. It features aggressive offline compression, strict chronological sorting, and offline reverse geocoding to keep local storage footprints small while maintaining a highly searchable archive.
 
+The intention behind this project is for me to be able to regularly take backups of my smartphone media into a staging folder divided into 3 folders - "me" for taking backup out of my phone's DCIM/Camera folder, "shared" for backup of any media folders that get shared with me by friends/family after anevent or trip and "misc" for media backed up from anywhere else (whatsapp media, documents, etc.). Then, this tool organizes the media from the staging folder into monthly folders and builds a SQLite DB table with all the metadata extracted from the files helping keep an archival of the media. 
+
+Note: The tool does compress the files to enable me to keep more files on my system. But I am able to do this because I also have uncompressed backups on external drives. I would recommend you use the tool on redundant copies of your backup, not on the only copies. For example, for video files, the initial script stripped away all the metadata as part of the optimization. You might not want that happening to your original files.
+
 ## 📂 Project Structure
 
 ```text
