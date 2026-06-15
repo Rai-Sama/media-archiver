@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, send_file
+from flask import Flask, request, render_template_string, send_file, jsonify
 import sqlite3
 from pathlib import Path
 import os
@@ -23,7 +23,6 @@ HTML_TEMPLATE = """
         .filter-row { display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-end; }
         .filter-label { font-size: 0.85em; color: #aaa; margin-bottom: 4px; display: block; text-transform: uppercase; letter-spacing: 0.5px; }
         
-        /* Removed the global width: 100% that was causing the ballooning */
         input[type="text"], input[type="date"], select { 
             padding: 10px; background: #2a2a2a; color: white; border: 1px solid #444; border-radius: 6px; outline: none; min-width: 150px;
             box-sizing: border-box;
@@ -51,6 +50,9 @@ HTML_TEMPLATE = """
         .autocomplete-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #333; word-break: break-all; color: #fff; font-size: 0.9em;}
         .autocomplete-item:hover { background-color: #007bff; }
         .autocomplete-item:last-child { border-bottom: none; }
+        
+        /* Spinner for loading state */
+        .loading-spinner { display: none; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #888; font-size: 0.8em; pointer-events: none; }
         /* ------------------------------- */
         
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 15px; }
@@ -117,6 +119,7 @@ HTML_TEMPLATE = """
                     <span class="filter-label">Camera Model</span>
                     <div class="autocomplete-wrapper">
                         <input type="text" id="cameraInput" name="camera" placeholder="e.g., SM-S911B" value="{{ request.args.get('camera', '') }}" autocomplete="off" style="width: 180px;">
+                        <span id="cameraLoader" class="loading-spinner">⏳</span>
                         <div id="cameraDropdown" class="autocomplete-dropdown"></div>
                     </div>
                 </div>
@@ -125,6 +128,7 @@ HTML_TEMPLATE = """
                     <span class="filter-label">Location</span>
                     <div class="autocomplete-wrapper">
                         <input type="text" id="locationInput" name="location" placeholder="City or State..." value="{{ request.args.get('location', '') }}" autocomplete="off" style="width: 200px;">
+                        <span id="locationLoader" class="loading-spinner">⏳</span>
                         <div id="locationDropdown" class="autocomplete-dropdown"></div>
                     </div>
                 </div>
@@ -136,6 +140,7 @@ HTML_TEMPLATE = """
                     <span class="filter-label">File Name</span>
                     <div class="autocomplete-wrapper">
                         <input type="text" id="filenameInput" name="name" placeholder="Exact filename snippet..." value="{{ request.args.get('name', '') }}" autocomplete="off" style="min-width: 200px;">
+                        <span id="filenameLoader" class="loading-spinner">⏳</span>
                         <div id="filenameDropdown" class="autocomplete-dropdown"></div>
                     </div>
                 </div>
@@ -201,46 +206,63 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        // --- Custom Unified Autocomplete Engine ---
-        const uniqueNames = {{ unique_names | tojson | safe }};
-        const uniqueCameras = {{ unique_cameras | tojson | safe }};
-        const uniqueLocations = {{ unique_locations | tojson | safe }};
-
-        function setupAutocomplete(inputId, dropdownId, dataArray) {
+        // --- API-Driven Autocomplete Engine ---
+        function setupApiAutocomplete(inputId, dropdownId, dbColumn) {
             const inputEl = document.getElementById(inputId);
             const dropdownEl = document.getElementById(dropdownId);
+            const loaderEl = document.getElementById(inputId.replace('Input', 'Loader'));
+            
+            let timeoutId; // Used for debouncing
 
             if (!inputEl || !dropdownEl) return;
 
             inputEl.addEventListener("input", function() {
-                const val = this.value.toLowerCase();
-                dropdownEl.innerHTML = ""; 
+                // Clear the previous timeout if the user is still typing
+                clearTimeout(timeoutId);
+                const val = this.value.trim();
                 
                 if (!val) {
                     dropdownEl.style.display = "none";
+                    if (loaderEl) loaderEl.style.display = "none";
                     return;
                 }
 
-                let matchCount = 0;
-                for (let i = 0; i < dataArray.length; i++) {
-                    if (dataArray[i].toLowerCase().includes(val)) {
-                        const itemDiv = document.createElement("div");
-                        itemDiv.className = "autocomplete-item";
-                        itemDiv.innerText = dataArray[i];
+                // Show a tiny loading spinner in the input box
+                if (loaderEl) loaderEl.style.display = "block";
+
+                // Wait 150ms after the last keystroke before querying the API
+                timeoutId = setTimeout(async () => {
+                    try {
+                        const response = await fetch(`/api/suggest?column=${dbColumn}&q=${encodeURIComponent(val)}`);
+                        if (!response.ok) throw new Error('Network response was not ok');
                         
-                        itemDiv.addEventListener("click", function() {
-                            inputEl.value = this.innerText;
+                        const dataArray = await response.json();
+                        dropdownEl.innerHTML = ""; 
+
+                        if (dataArray.length === 0) {
                             dropdownEl.style.display = "none";
-                        });
-                        
-                        dropdownEl.appendChild(itemDiv);
-                        matchCount++;
-                        
-                        if (matchCount >= 30) break; 
+                        } else {
+                            dataArray.forEach(itemText => {
+                                const itemDiv = document.createElement("div");
+                                itemDiv.className = "autocomplete-item";
+                                itemDiv.innerText = itemText;
+                                
+                                itemDiv.addEventListener("click", function() {
+                                    inputEl.value = this.innerText;
+                                    dropdownEl.style.display = "none";
+                                });
+                                
+                                dropdownEl.appendChild(itemDiv);
+                            });
+                            dropdownEl.style.display = "block";
+                        }
+                    } catch (error) {
+                        console.error('Fetch error:', error);
+                        dropdownEl.style.display = "none";
+                    } finally {
+                        if (loaderEl) loaderEl.style.display = "none";
                     }
-                }
-                
-                dropdownEl.style.display = matchCount > 0 ? "block" : "none";
+                }, 150); 
             });
 
             document.addEventListener("click", function (e) {
@@ -250,9 +272,10 @@ HTML_TEMPLATE = """
             });
         }
 
-        setupAutocomplete("filenameInput", "filenameDropdown", uniqueNames);
-        setupAutocomplete("cameraInput", "cameraDropdown", uniqueCameras);
-        setupAutocomplete("locationInput", "locationDropdown", uniqueLocations);
+        // Initialize the engine pointing to the exact database columns
+        setupApiAutocomplete("filenameInput", "filenameDropdown", "original_name");
+        setupApiAutocomplete("cameraInput", "cameraDropdown", "camera_model");
+        setupApiAutocomplete("locationInput", "locationDropdown", "location_name");
 
         // --- Lightbox Engine ---
         const galleryData = [
@@ -367,6 +390,29 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+# --- NEW: Dedicated API Route for Autocomplete ---
+@app.route("/api/suggest")
+def api_suggest():
+    column = request.args.get("column")
+    query_str = request.args.get("q", "")
+    
+    # Whitelist columns to prevent SQL Injection
+    valid_columns = {"original_name", "camera_model", "location_name"}
+    if column not in valid_columns or not query_str:
+        return jsonify([])
+        
+    conn = get_db_connection()
+    # Query up to 20 unique matches instantly
+    query = f"SELECT DISTINCT {column} FROM media WHERE {column} LIKE ? ORDER BY {column} LIMIT 20"
+    
+    # Use wildcards around the query string to match anywhere in the text
+    results = conn.execute(query, (f"%{query_str}%",)).fetchall()
+    conn.close()
+    
+    # Extract the first element of each row and return as a clean JSON array
+    suggestions = [row[0] for row in results if row[0]]
+    return jsonify(suggestions)
+
 @app.route("/")
 def index():
     source = request.args.get("source", "")
@@ -382,9 +428,7 @@ def index():
     
     conn = get_db_connection()
     
-    unique_cameras = [row[0] for row in conn.execute("SELECT DISTINCT camera_model FROM media WHERE camera_model IS NOT NULL ORDER BY camera_model").fetchall()]
-    unique_locations = [row[0] for row in conn.execute("SELECT DISTINCT location_name FROM media WHERE location_name IS NOT NULL ORDER BY location_name").fetchall()]
-    unique_names = [row[0] for row in conn.execute("SELECT DISTINCT original_name FROM media WHERE original_name IS NOT NULL ORDER BY original_name").fetchall()]
+    # Removed the heavy initial DB queries for unique items
 
     query = """
         SELECT original_name, current_path, file_type, source, 
@@ -426,7 +470,7 @@ def index():
     results = conn.execute(query, params).fetchall()
     conn.close()
     
-    return render_template_string(HTML_TEMPLATE, results=results, unique_cameras=unique_cameras, unique_locations=unique_locations, unique_names=unique_names)
+    return render_template_string(HTML_TEMPLATE, results=results)
 
 @app.route("/file")
 def serve_file():
