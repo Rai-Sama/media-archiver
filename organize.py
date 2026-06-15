@@ -8,6 +8,7 @@ from pillow_heif import register_heif_opener
 import subprocess
 import json
 import reverse_geocoder as rg
+import re
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -80,10 +81,22 @@ def get_rich_metadata(file_path, file_type):
             
             if "format" in data and "tags" in data["format"]:
                 tags = {k.lower(): v for k, v in data["format"]["tags"].items()}
+                
+                # Extract Date
                 raw_date = tags.get("creation_time")
                 if raw_date:
                     meta["date_taken"] = raw_date.replace("T", " ")[:19]
-                meta["camera_model"] = tags.get("model") or tags.get("com.android.model")
+                
+                # Extract Camera Model (Expanded to catch iOS and alternate Android formats)
+                meta["camera_model"] = tags.get("model") or tags.get("com.android.model") or tags.get("com.apple.quicktime.model")
+                
+                # NEW: Extract GPS from ISO 6709 string (e.g., +12.9716+077.5946/)
+                location_str = tags.get("location") or tags.get("location-eng")
+                if location_str:
+                    match = re.search(r'([+-]\d+\.\d+)([+-]\d+\.\d+)', location_str)
+                    if match:
+                        meta["lat"] = float(match.group(1))
+                        meta["lon"] = float(match.group(2))
                 
             for stream in data.get("streams", []):
                 if stream.get("codec_type") == "video":
@@ -94,7 +107,7 @@ def get_rich_metadata(file_path, file_type):
             pass 
         return meta
 
-    # --- IMAGE PROCESSING ---
+        # --- IMAGE PROCESSING ---
     try:
         with Image.open(file_path) as img:
             meta["width"] = img.width
@@ -180,6 +193,7 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         new_target = target_path.with_suffix('.mp4')
         cmd = [
             "ffmpeg", "-y", "-i", str(source_path), 
+            "-map_metadata", "0", 
             "-c:v", "libx265", "-crf", "28", "-preset", "medium", 
             "-c:a", "aac", "-b:a", "128k", "-async", "1",
             "-v", "quiet", str(new_target)
