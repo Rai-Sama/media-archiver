@@ -170,6 +170,18 @@ HTML_TEMPLATE = """
                     <label><input type="checkbox" name="flash" value="1" {% if request.args.get('flash') == '1' %}checked{% endif %}> ⚡ Flash</label>
                 </div>
                 
+                <div class="input-group" style="width: 180px;">
+                    <span class="filter-label">Sort By</span>
+                    <select name="sort">
+                        <option value="date_desc" {% if request.args.get('sort') == 'date_desc' or not request.args.get('sort') %}selected{% endif %}>Date (Newest First)</option>
+                        <option value="date_asc" {% if request.args.get('sort') == 'date_asc' %}selected{% endif %}>Date (Oldest First)</option>
+                        <option value="size_desc" {% if request.args.get('sort') == 'size_desc' %}selected{% endif %}>Size (Largest First)</option>
+                        <option value="size_asc" {% if request.args.get('sort') == 'size_asc' %}selected{% endif %}>Size (Smallest First)</option>
+                        <option value="name_asc" {% if request.args.get('sort') == 'name_asc' %}selected{% endif %}>Name (A to Z)</option>
+                        <option value="name_desc" {% if request.args.get('sort') == 'name_desc' %}selected{% endif %}>Name (Z to A)</option>
+                    </select>
+                </div>
+
                 <div style="display: flex; flex-grow: 1; justify-content: flex-end; gap: 10px;">
                     <a href="/" class="clear-btn">Reset</a>
                     <button type="submit">Search</button>
@@ -299,7 +311,6 @@ HTML_TEMPLATE = """
             {% for item in results %}
             {
                 type: "{{ item.file_type }}",
-                // The lightbox still requests the original full resolution /file
                 src: "/file?path={{ item.current_path | urlencode }}" 
             }{% if not loop.last %},{% endif %}
             {% endfor %}
@@ -424,7 +435,6 @@ def api_suggest():
     suggestions = [row[0] for row in results if row[0]]
     return jsonify(suggestions)
 
-# --- NEW: On-The-Fly Thumbnail Generator ---
 @app.route("/thumbnail")
 def serve_thumbnail():
     file_path = request.args.get("path")
@@ -433,30 +443,24 @@ def serve_thumbnail():
     if not file_path or not os.path.exists(file_path):
         return "Not found", 404
         
-    # Generate a unique filename for the cache based on the absolute path
     path_hash = hashlib.md5(file_path.encode('utf-8')).hexdigest()
     cache_path = THUMB_DIR / f"{path_hash}.jpg"
     
-    # 1. If we already made it previously, serve it instantly
     if cache_path.exists():
         return send_file(cache_path)
         
-    # 2. Generate Photo Thumbnail
     if file_type == "image":
         try:
             with Image.open(file_path) as img:
-                # Corrects orientation if the phone took the photo sideways
                 img = ImageOps.exif_transpose(img) 
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
-                # Resize down to a max bounding box of 400x400
                 img.thumbnail((400, 400))
                 img.save(cache_path, "JPEG", quality=75)
             return send_file(cache_path)
         except Exception:
-            return send_file(file_path) # Fallback to original if Pillow fails
+            return send_file(file_path)
             
-    # 3. Generate Video Thumbnail (Rips the frame at the 0.1 second mark)
     elif file_type == "video":
         try:
             cmd = [
@@ -467,7 +471,6 @@ def serve_thumbnail():
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             return send_file(cache_path)
         except Exception:
-            # Fallback to the original file to prevent a broken image icon
             return send_file(file_path)
 
 @app.route("/")
@@ -488,6 +491,22 @@ def index():
     has_gps = request.args.get("has_gps", "")
     flash = request.args.get("flash", "")
     
+    # --- NEW: Extract and map the sort parameter securely ---
+    sort_param = request.args.get("sort", "date_desc")
+    
+    sort_mapping = {
+        "date_desc": "date_taken DESC",
+        "date_asc": "date_taken ASC",
+        "size_desc": "file_size_kb DESC",
+        "size_asc": "file_size_kb ASC",
+        "name_asc": "original_name ASC",
+        "name_desc": "original_name DESC"
+    }
+    
+    # Fallback to date_desc if the user tampers with the URL
+    order_by_clause = sort_mapping.get(sort_param, "date_taken DESC")
+    # --------------------------------------------------------
+
     conditions = ""
     params = []
     
@@ -533,11 +552,12 @@ def index():
         
     offset = (page - 1) * per_page
     
+    # --- NEW: Inject the safe order_by_clause into the SQL query ---
     data_query = f"""
         SELECT original_name, current_path, file_type, source, 
                date_taken, camera_model, file_size_kb, location_name 
         FROM media WHERE 1=1 {conditions}
-        ORDER BY date_taken DESC LIMIT {per_page} OFFSET ?
+        ORDER BY {order_by_clause} LIMIT {per_page} OFFSET ?
     """
     
     params.append(offset)

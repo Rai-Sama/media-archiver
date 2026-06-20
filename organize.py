@@ -10,6 +10,8 @@ import json
 import reverse_geocoder as rg
 import re
 import hashlib
+import rawpy
+import exifread
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -27,7 +29,6 @@ DB_PATH = BASE_DIR / "media_index.db"
 THUMB_DIR = BASE_DIR / ".thumbnails"
 THUMB_DIR.mkdir(parents=True, exist_ok=True)
 
-# Ensure directories exist
 for path in STAGING_DIRS.values():
     path.mkdir(parents=True, exist_ok=True)
 ORGANIZED_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,17 +57,17 @@ def init_db():
             location_name TEXT
         )
     """)
-    # Indexes for lightning-fast queries
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_source ON media(source)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_date ON media(date_taken)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_camera ON media(camera_model)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON media(location_name)")
+    # Instant Zero-Cost Deduplication Index
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_name ON media(original_name)")
     conn.commit()
     conn.close()
 
-def get_rich_metadata(file_path, file_type):
-    """Extracts extensive metadata from both images and videos."""
+def get_rich_metadata(file_path, file_type, ext):
+    """Extracts extensive metadata from images, videos, and RAW files."""
     meta = {
         "date_taken": None, "camera_model": None, 
         "width": None, "height": None, "f_stop": None,
@@ -74,7 +75,20 @@ def get_rich_metadata(file_path, file_type):
         "lat": None, "lon": None
     }
     
-    if file_type == "document":
+    if file_type in ["document", "audio"]:
+        return meta
+
+    # --- RAW PROCESSING ---
+    if ext in ['.dng', '.cr2', '.nef', '.arw']:
+        try:
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+                if "EXIF DateTimeOriginal" in tags:
+                    meta["date_taken"] = str(tags["EXIF DateTimeOriginal"])
+                if "Image Model" in tags:
+                    meta["camera_model"] = str(tags["Image Model"]).strip()
+        except Exception:
+            pass
         return meta
 
     # --- VIDEO PROCESSING ---
@@ -87,15 +101,12 @@ def get_rich_metadata(file_path, file_type):
             if "format" in data and "tags" in data["format"]:
                 tags = {k.lower(): v for k, v in data["format"]["tags"].items()}
                 
-                # Extract Date
                 raw_date = tags.get("creation_time")
                 if raw_date:
                     meta["date_taken"] = raw_date.replace("T", " ")[:19]
                 
-                # Extract Camera Model (Expanded to catch iOS and alternate Android formats)
                 meta["camera_model"] = tags.get("model") or tags.get("com.android.model") or tags.get("com.apple.quicktime.model")
                 
-                # NEW: Extract GPS from ISO 6709 string (e.g., +12.9716+077.5946/)
                 location_str = tags.get("location") or tags.get("location-eng")
                 if location_str:
                     match = re.search(r'([+-]\d+\.\d+)([+-]\d+\.\d+)', location_str)
@@ -112,7 +123,7 @@ def get_rich_metadata(file_path, file_type):
             pass 
         return meta
 
-        # --- IMAGE PROCESSING ---
+    # --- IMAGE PROCESSING ---
     try:
         with Image.open(file_path) as img:
             meta["width"] = img.width
@@ -167,7 +178,26 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         target_path = target_dir / f"{source_path.stem}_{counter}{ext}"
         counter += 1
 
-    if file_type == "image":
+    # Handle RAW Conversions
+    if ext in ['.dng', '.cr2', '.nef', '.arw']:
+        new_target = target_path.with_suffix('.jpg')
+        # Ensure the fallback jpg name doesn't exist either
+        while new_target.exists():
+            new_target = target_dir / f"{source_path.stem}_{counter}.jpg"
+            counter += 1
+            
+        try:
+            with rawpy.imread(str(source_path)) as raw:
+                rgb = raw.postprocess(use_camera_wb=True)
+                Image.fromarray(rgb).save(new_target, "JPEG", quality=75, optimize=True)
+            os.remove(source_path)
+            return new_target
+        except Exception:
+            os.rename(source_path, target_path)
+            return target_path
+
+    # Handle Standard Images
+    elif file_type == "image":
         try:
             with Image.open(source_path) as img:
                 if getattr(img, "is_animated", False):
@@ -194,6 +224,7 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
             os.rename(source_path, target_path)
             return target_path
 
+    # Handle Videos
     elif file_type == "video":
         new_target = target_path.with_suffix('.mp4')
         cmd = [
@@ -210,17 +241,18 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         except subprocess.CalledProcessError:
             os.rename(source_path, target_path)
             return target_path
+            
+    # Handle Documents & Audio
     else:
         os.rename(source_path, target_path)
         return target_path
 
 def generate_thumbnail(file_path, file_type):
-    """Generates and caches a thumbnail during the organization phase."""
     path_hash = hashlib.md5(str(file_path).encode('utf-8')).hexdigest()
     cache_path = THUMB_DIR / f"{path_hash}.jpg"
     
     if cache_path.exists():
-        return # Already done
+        return
 
     try:
         if file_type == "image":
@@ -239,38 +271,61 @@ def generate_thumbnail(file_path, file_type):
             ]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except Exception as e:
-        print(f"Could not generate thumbnail for {file_path}: {e}")
-
+        pass
 
 def process_staging():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
+    raw_exts = {'.dng', '.cr2', '.nef', '.arw'}
     video_exts = {'.mp4', '.mkv', '.mov', '.avi'}
     doc_exts = {'.pdf', '.docx', '.txt', '.xlsx', '.csv'}
+    audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
+    
     files_processed = 0
+    duplicates_skipped = 0
 
     for source_name, folder_path in STAGING_DIRS.items():
         for file_path in folder_path.rglob("*"):
             if file_path.is_dir(): continue
 
-            # --- NEW: ZERO-COST DEDUPLICATION CHECK ---
+            # Instantly bypass processing if the exact filename is already indexed
             cursor.execute("SELECT 1 FROM media WHERE original_name = ?", (file_path.name,))
             if cursor.fetchone():
                 duplicates_skipped += 1
-                continue # Instantly skips to the next file, leaving this one in staging
-            # ------------------------------------------
+                continue 
                 
             ext = file_path.suffix.lower()
-            if ext not in image_exts and ext not in video_exts and ext not in doc_exts: continue
+            valid_exts = image_exts | raw_exts | video_exts | doc_exts | audio_exts
+            if ext not in valid_exts: 
+                continue
                 
             if ext in image_exts: file_type = "image"
+            elif ext in raw_exts: file_type = "image" # Process RAWs as viewable images
             elif ext in video_exts: file_type = "video"
+            elif ext in audio_exts: file_type = "audio"
             else: file_type = "document"
             
             # Extract Data
-            m = get_rich_metadata(file_path, file_type)
+            m = get_rich_metadata(file_path, file_type, ext)
+            
+            # --- LIVE PHOTO SYNCHRONIZATION ---
+            if file_type == "video":
+                # Look for a master photo next to the video
+                for img_ext in ['.heic', '.jpg', '.jpeg']:
+                    potential_match = file_path.with_suffix(img_ext)
+                    if potential_match.exists():
+                        m_photo = get_rich_metadata(potential_match, "image", img_ext)
+                        # Forcefully inherit the master photo's metadata
+                        if m_photo.get("date_taken"): m["date_taken"] = m_photo["date_taken"]
+                        if m_photo.get("lat"): 
+                            m["lat"] = m_photo["lat"]
+                            m["lon"] = m_photo["lon"]
+                        if m_photo.get("camera_model"): m["camera_model"] = m_photo["camera_model"]
+                        break
+            # ----------------------------------
+            
             parsed_date = get_fallback_date(file_path, m["date_taken"])
             
             # Target Path Logic
@@ -279,7 +334,10 @@ def process_staging():
             
             # Compress and move
             final_target_path = compress_and_move(file_path, target_dir, file_path.name, file_type, ext)
-            generate_thumbnail(final_target_path, file_type)
+            
+            if file_type in ["image", "video"]:
+                generate_thumbnail(final_target_path, file_type)
+                
             new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
             
             # Offline Geocoding
@@ -311,7 +369,10 @@ def process_staging():
 
     conn.commit()
     conn.close()
+    
     print(f"Organized and indexed {files_processed} files.")
+    if duplicates_skipped > 0:
+        print(f"Skipped {duplicates_skipped} exact name duplicates (left safely in staging).")
 
 if __name__ == "__main__":
     init_db()
