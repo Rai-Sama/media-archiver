@@ -12,6 +12,9 @@ import re
 import hashlib
 import rawpy
 import exifread
+import face_recognition
+import numpy as np
+from sklearn.cluster import DBSCAN
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -57,17 +60,32 @@ def init_db():
             location_name TEXT
         )
     """)
+    # Add Facial Recognition Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS faces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id INTEGER,
+            encoding BLOB,
+            cluster_id INTEGER,
+            person_name TEXT,
+            FOREIGN KEY(media_id) REFERENCES media(id)
+        )
+    """)
+    
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_source ON media(source)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_date ON media(date_taken)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_camera ON media(camera_model)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON media(location_name)")
-    # Instant Zero-Cost Deduplication Index
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_name ON media(original_name)")
+    
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_id ON faces(media_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_person_name ON faces(person_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cluster_id ON faces(cluster_id)")
+    
     conn.commit()
     conn.close()
 
 def get_rich_metadata(file_path, file_type, ext):
-    """Extracts extensive metadata from images, videos, and RAW files."""
     meta = {
         "date_taken": None, "camera_model": None, 
         "width": None, "height": None, "f_stop": None,
@@ -178,10 +196,8 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         target_path = target_dir / f"{source_path.stem}_{counter}{ext}"
         counter += 1
 
-    # Handle RAW Conversions
     if ext in ['.dng', '.cr2', '.nef', '.arw']:
         new_target = target_path.with_suffix('.jpg')
-        # Ensure the fallback jpg name doesn't exist either
         while new_target.exists():
             new_target = target_dir / f"{source_path.stem}_{counter}.jpg"
             counter += 1
@@ -196,7 +212,6 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
             os.rename(source_path, target_path)
             return target_path
 
-    # Handle Standard Images
     elif file_type == "image":
         try:
             with Image.open(source_path) as img:
@@ -224,7 +239,6 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
             os.rename(source_path, target_path)
             return target_path
 
-    # Handle Videos
     elif file_type == "video":
         new_target = target_path.with_suffix('.mp4')
         cmd = [
@@ -242,7 +256,6 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
             os.rename(source_path, target_path)
             return target_path
             
-    # Handle Documents & Audio
     else:
         os.rename(source_path, target_path)
         return target_path
@@ -252,7 +265,7 @@ def generate_thumbnail(file_path, file_type):
     cache_path = THUMB_DIR / f"{path_hash}.jpg"
     
     if cache_path.exists():
-        return
+        return cache_path
 
     try:
         if file_type == "image":
@@ -262,6 +275,7 @@ def generate_thumbnail(file_path, file_type):
                     img = img.convert('RGB')
                 img.thumbnail((400, 400))
                 img.save(cache_path, "JPEG", quality=75)
+            return cache_path
         
         elif file_type == "video":
             cmd = [
@@ -270,10 +284,29 @@ def generate_thumbnail(file_path, file_type):
                 "-vf", "scale=400:-1", str(cache_path)
             ]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return cache_path
+    except Exception:
+        return None
+
+def extract_faces(media_id, thumbnail_path, cursor):
+    if not thumbnail_path or not thumbnail_path.exists():
+        return
+        
+    try:
+        image = face_recognition.load_image_file(str(thumbnail_path))
+        face_encodings = face_recognition.face_encodings(image)
+        
+        for encoding in face_encodings:
+            encoding_blob = encoding.tobytes()
+            cursor.execute("""
+                INSERT INTO faces (media_id, encoding) 
+                VALUES (?, ?)
+            """, (media_id, encoding_blob))
     except Exception as e:
-        pass
+        print(f"Face extraction failed for ID {media_id}: {e}")
 
 def process_staging():
+    print("--- Starting Media Pipeline ---")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -290,7 +323,6 @@ def process_staging():
         for file_path in folder_path.rglob("*"):
             if file_path.is_dir(): continue
 
-            # Instantly bypass processing if the exact filename is already indexed
             cursor.execute("SELECT 1 FROM media WHERE original_name = ?", (file_path.name,))
             if cursor.fetchone():
                 duplicates_skipped += 1
@@ -302,45 +334,38 @@ def process_staging():
                 continue
                 
             if ext in image_exts: file_type = "image"
-            elif ext in raw_exts: file_type = "image" # Process RAWs as viewable images
+            elif ext in raw_exts: file_type = "image"
             elif ext in video_exts: file_type = "video"
             elif ext in audio_exts: file_type = "audio"
             else: file_type = "document"
             
-            # Extract Data
             m = get_rich_metadata(file_path, file_type, ext)
             
-            # --- LIVE PHOTO SYNCHRONIZATION ---
             if file_type == "video":
-                # Look for a master photo next to the video
                 for img_ext in ['.heic', '.jpg', '.jpeg']:
                     potential_match = file_path.with_suffix(img_ext)
                     if potential_match.exists():
                         m_photo = get_rich_metadata(potential_match, "image", img_ext)
-                        # Forcefully inherit the master photo's metadata
                         if m_photo.get("date_taken"): m["date_taken"] = m_photo["date_taken"]
                         if m_photo.get("lat"): 
                             m["lat"] = m_photo["lat"]
                             m["lon"] = m_photo["lon"]
                         if m_photo.get("camera_model"): m["camera_model"] = m_photo["camera_model"]
                         break
-            # ----------------------------------
             
             parsed_date = get_fallback_date(file_path, m["date_taken"])
             
-            # Target Path Logic
             target_dir = ORGANIZED_DIR / parsed_date.strftime("%Y") / parsed_date.strftime("%m")
             target_dir.mkdir(parents=True, exist_ok=True)
             
-            # Compress and move
             final_target_path = compress_and_move(file_path, target_dir, file_path.name, file_type, ext)
             
+            thumbnail_path = None
             if file_type in ["image", "video"]:
-                generate_thumbnail(final_target_path, file_type)
+                thumbnail_path = generate_thumbnail(final_target_path, file_type)
                 
             new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
             
-            # Offline Geocoding
             location_str = None
             if m["lat"] is not None and m["lon"] is not None:
                 try:
@@ -352,7 +377,6 @@ def process_staging():
                 except Exception:
                     pass
             
-            # Insert into DB
             cursor.execute("""
                 INSERT OR REPLACE INTO media 
                 (original_name, current_path, file_type, source, date_taken, 
@@ -365,6 +389,12 @@ def process_staging():
                 m["width"], m["height"], m["camera_model"], m["f_stop"], 
                 m["exposure_time"], m["iso"], m["flash_fired"], m["lat"], m["lon"], location_str
             ))
+            
+            media_id = cursor.lastrowid
+            
+            if thumbnail_path:
+                extract_faces(media_id, thumbnail_path, cursor)
+                
             files_processed += 1
 
     conn.commit()
@@ -374,6 +404,57 @@ def process_staging():
     if duplicates_skipped > 0:
         print(f"Skipped {duplicates_skipped} exact name duplicates (left safely in staging).")
 
+def cluster_faces():
+    """Runs DBSCAN to cluster all facial vectors in the database."""
+    print("\n--- Running Facial Clustering ---")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, encoding FROM faces")
+    rows = cursor.fetchall()
+
+    if not rows:
+        print("No faces found in the database to cluster.")
+        conn.close()
+        return
+
+    face_ids = []
+    encodings = []
+
+    for row_id, blob in rows:
+        try:
+            encoding = np.frombuffer(blob, dtype=np.float64)
+            face_ids.append(row_id)
+            encodings.append(encoding)
+        except Exception:
+            pass
+
+    if not encodings:
+        print("No valid encodings found.")
+        conn.close()
+        return
+
+    print(f"Running DBSCAN algorithm on {len(encodings)} faces...")
+    
+    # eps=0.45 is strict enough to prevent false matches, loose enough to catch different angles
+    clt = DBSCAN(metric="euclidean", n_jobs=-1, eps=0.45, min_samples=3)
+    clt.fit(encodings)
+
+    cluster_ids = clt.labels_
+    
+    unique_clusters = len(set(cluster_ids)) - (1 if -1 in cluster_ids else 0)
+    print(f"Success! Grouped faces into {unique_clusters} distinct people.")
+
+    print("Saving cluster assignments to the database...")
+    updates = [(int(cid), fid) for fid, cid in zip(face_ids, cluster_ids)]
+    cursor.executemany("UPDATE faces SET cluster_id = ? WHERE id = ?", updates)
+    
+    conn.commit()
+    conn.close()
+    print("Pipeline Complete! Ready for UI interaction.")
+
 if __name__ == "__main__":
     init_db()
     process_staging()
+    # Execute the clustering instantly after the staging queue is processed
+    cluster_faces()
