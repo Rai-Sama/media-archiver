@@ -2,13 +2,14 @@ import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageOps
 from PIL.ExifTags import TAGS, GPSTAGS
 from pillow_heif import register_heif_opener
 import subprocess
 import json
 import reverse_geocoder as rg
 import re
+import hashlib
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -22,6 +23,9 @@ STAGING_DIRS = {
 }
 ORGANIZED_DIR = BASE_DIR / "organized"
 DB_PATH = BASE_DIR / "media_index.db"
+
+THUMB_DIR = BASE_DIR / ".thumbnails"
+THUMB_DIR.mkdir(parents=True, exist_ok=True)
 
 # Ensure directories exist
 for path in STAGING_DIRS.values():
@@ -57,6 +61,7 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_date ON media(date_taken)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_camera ON media(camera_model)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON media(location_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_name ON media(original_name)")
     conn.commit()
     conn.close()
 
@@ -209,6 +214,34 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         os.rename(source_path, target_path)
         return target_path
 
+def generate_thumbnail(file_path, file_type):
+    """Generates and caches a thumbnail during the organization phase."""
+    path_hash = hashlib.md5(str(file_path).encode('utf-8')).hexdigest()
+    cache_path = THUMB_DIR / f"{path_hash}.jpg"
+    
+    if cache_path.exists():
+        return # Already done
+
+    try:
+        if file_type == "image":
+            with Image.open(file_path) as img:
+                img = ImageOps.exif_transpose(img)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                img.thumbnail((400, 400))
+                img.save(cache_path, "JPEG", quality=75)
+        
+        elif file_type == "video":
+            cmd = [
+                "ffmpeg", "-y", "-i", str(file_path), 
+                "-ss", "00:00:00.100", "-vframes", "1", 
+                "-vf", "scale=400:-1", str(cache_path)
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except Exception as e:
+        print(f"Could not generate thumbnail for {file_path}: {e}")
+
+
 def process_staging():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -221,6 +254,13 @@ def process_staging():
     for source_name, folder_path in STAGING_DIRS.items():
         for file_path in folder_path.rglob("*"):
             if file_path.is_dir(): continue
+
+            # --- NEW: ZERO-COST DEDUPLICATION CHECK ---
+            cursor.execute("SELECT 1 FROM media WHERE original_name = ?", (file_path.name,))
+            if cursor.fetchone():
+                duplicates_skipped += 1
+                continue # Instantly skips to the next file, leaving this one in staging
+            # ------------------------------------------
                 
             ext = file_path.suffix.lower()
             if ext not in image_exts and ext not in video_exts and ext not in doc_exts: continue
@@ -239,6 +279,7 @@ def process_staging():
             
             # Compress and move
             final_target_path = compress_and_move(file_path, target_dir, file_path.name, file_type, ext)
+            generate_thumbnail(final_target_path, file_type)
             new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
             
             # Offline Geocoding
