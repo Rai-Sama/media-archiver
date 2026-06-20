@@ -106,7 +106,7 @@ HTML_TEMPLATE = """
                 <div class="input-group">
                     <span class="filter-label">Person</span>
                     <div class="autocomplete-wrapper">
-                        <input type="text" id="personInput" name="person" placeholder="Name..." value="{{ request.args.get('person', '') }}" autocomplete="off" style="width: 160px; border-color: #00bfff;">
+                        <input type="text" id="personInput" name="person" placeholder="e.g., Anshuman" value="{{ request.args.get('person', '') }}" autocomplete="off" style="width: 180px; border-color: #00bfff;">
                         <span id="personLoader" class="loading-spinner">⏳</span>
                         <div id="personDropdown" class="autocomplete-dropdown"></div>
                     </div>
@@ -241,7 +241,8 @@ HTML_TEMPLATE = """
             window.location.href = url.toString();
         }
 
-        function setupApiAutocomplete(inputId, dropdownId, apiEndpoint) {
+        // --- UPGRADED: Multi-Select & Focus-to-Show Autocomplete Engine ---
+        function setupApiAutocomplete(inputId, dropdownId, apiEndpoint, isMulti = false) {
             const inputEl = document.getElementById(inputId);
             const dropdownEl = document.getElementById(dropdownId);
             const loaderEl = document.getElementById(inputId.replace('Input', 'Loader'));
@@ -249,48 +250,73 @@ HTML_TEMPLATE = """
 
             if (!inputEl || !dropdownEl) return;
 
+            async function fetchSuggestions(searchQuery) {
+                if (loaderEl) loaderEl.style.display = "block";
+                try {
+                    const url = new URL(apiEndpoint, window.location.origin);
+                    if (searchQuery) url.searchParams.set('q', searchQuery);
+                    
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error('Network response was not ok');
+                    
+                    const dataArray = await response.json();
+                    dropdownEl.innerHTML = ""; 
+
+                    if (dataArray.length === 0) {
+                        dropdownEl.style.display = "none";
+                    } else {
+                        dataArray.forEach(itemText => {
+                            const itemDiv = document.createElement("div");
+                            itemDiv.className = "autocomplete-item";
+                            itemDiv.innerText = itemText;
+                            
+                            itemDiv.addEventListener("click", function(e) {
+                                if (isMulti) {
+                                    // Comma-separated appending logic
+                                    const parts = inputEl.value.split(",");
+                                    parts.pop(); 
+                                    parts.push(this.innerText);
+                                    inputEl.value = parts.join(", ") + (parts.length > 0 ? ", " : "");
+                                } else {
+                                    inputEl.value = this.innerText;
+                                }
+                                dropdownEl.style.display = "none";
+                                inputEl.focus(); // Keep the cursor in the box
+                                e.stopPropagation();
+                            });
+                            dropdownEl.appendChild(itemDiv);
+                        });
+                        dropdownEl.style.display = "block";
+                    }
+                } catch (error) {
+                    dropdownEl.style.display = "none";
+                } finally {
+                    if (loaderEl) loaderEl.style.display = "none";
+                }
+            }
+
             inputEl.addEventListener("input", function() {
                 clearTimeout(timeoutId);
-                const val = this.value.trim();
-                
-                if (!val) {
-                    dropdownEl.style.display = "none";
-                    if (loaderEl) loaderEl.style.display = "none";
-                    return;
+                let query = this.value;
+                if (isMulti) {
+                    const parts = query.split(",");
+                    query = parts[parts.length - 1].trim(); // Only search the text after the last comma
+                } else {
+                    query = query.trim();
                 }
+                timeoutId = setTimeout(() => fetchSuggestions(query), 150); 
+            });
 
-                if (loaderEl) loaderEl.style.display = "block";
-
-                timeoutId = setTimeout(async () => {
-                    try {
-                        const response = await fetch(`${apiEndpoint}&q=${encodeURIComponent(val)}`);
-                        if (!response.ok) throw new Error('Network response was not ok');
-                        
-                        const dataArray = await response.json();
-                        dropdownEl.innerHTML = ""; 
-
-                        if (dataArray.length === 0) {
-                            dropdownEl.style.display = "none";
-                        } else {
-                            dataArray.forEach(itemText => {
-                                const itemDiv = document.createElement("div");
-                                itemDiv.className = "autocomplete-item";
-                                itemDiv.innerText = itemText;
-                                
-                                itemDiv.addEventListener("click", function() {
-                                    inputEl.value = this.innerText;
-                                    dropdownEl.style.display = "none";
-                                });
-                                dropdownEl.appendChild(itemDiv);
-                            });
-                            dropdownEl.style.display = "block";
-                        }
-                    } catch (error) {
-                        dropdownEl.style.display = "none";
-                    } finally {
-                        if (loaderEl) loaderEl.style.display = "none";
-                    }
-                }, 150); 
+            // Trigger fetch immediately when the user clicks the box
+            inputEl.addEventListener("focus", function() {
+                let query = this.value;
+                if (isMulti) {
+                    const parts = query.split(",");
+                    query = parts[parts.length - 1].trim();
+                } else {
+                    query = query.trim();
+                }
+                fetchSuggestions(query);
             });
 
             document.addEventListener("click", function (e) {
@@ -300,10 +326,11 @@ HTML_TEMPLATE = """
             });
         }
 
-        setupApiAutocomplete("filenameInput", "filenameDropdown", "/api/suggest?column=original_name");
-        setupApiAutocomplete("cameraInput", "cameraDropdown", "/api/suggest?column=camera_model");
-        setupApiAutocomplete("locationInput", "locationDropdown", "/api/suggest?column=location_name");
-        setupApiAutocomplete("personInput", "personDropdown", "/api/suggest_person?");
+        // Initialize with isMulti set to TRUE only for the Person box
+        setupApiAutocomplete("personInput", "personDropdown", "/api/suggest_person", true);
+        setupApiAutocomplete("filenameInput", "filenameDropdown", "/api/suggest?column=original_name", false);
+        setupApiAutocomplete("cameraInput", "cameraDropdown", "/api/suggest?column=camera_model", false);
+        setupApiAutocomplete("locationInput", "locationDropdown", "/api/suggest?column=location_name", false);
 
         const galleryData = [
             {% for item in results %}
@@ -395,7 +422,6 @@ PEOPLE_HTML_TEMPLATE = """
         .name-input-group button { padding: 8px 12px; background: #28a745; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
         .name-input-group button:hover { background: #218838; }
 
-        /* Gallery Link Style */
         .gallery-link { display: block; text-decoration: none; transition: transform 0.1s; }
         .gallery-link:hover { transform: scale(1.02); }
     </style>
@@ -470,7 +496,6 @@ PEOPLE_HTML_TEMPLATE = """
                 });
                 
                 if (response.ok) {
-                    // Hide the card instantly for a smooth UX
                     document.getElementById(`cluster-${clusterId}`).style.display = 'none';
                 } else {
                     alert('Failed to save name.');
@@ -500,20 +525,31 @@ def get_db_connection():
 def api_suggest():
     column = request.args.get("column")
     query_str = request.args.get("q", "")
-    if column not in {"original_name", "camera_model", "location_name"} or not query_str:
-        return jsonify([])
+    valid_columns = {"original_name", "camera_model", "location_name"}
+    if column not in valid_columns: return jsonify([])
+    
     conn = get_db_connection()
-    results = conn.execute(f"SELECT DISTINCT {column} FROM media WHERE {column} LIKE ? ORDER BY {column} LIMIT 20", (f"%{query_str}%",)).fetchall()
+    # Now returns top 50 matches so the click-to-open dropdown is fully populated
+    if query_str:
+        results = conn.execute(f"SELECT DISTINCT {column} FROM media WHERE {column} LIKE ? ORDER BY {column} LIMIT 50", (f"%{query_str}%",)).fetchall()
+    else:
+        results = conn.execute(f"SELECT DISTINCT {column} FROM media WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 50").fetchall()
     conn.close()
+    
     return jsonify([row[0] for row in results if row[0]])
 
 @app.route("/api/suggest_person")
 def api_suggest_person():
     query_str = request.args.get("q", "")
-    if not query_str: return jsonify([])
     conn = get_db_connection()
-    results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name LIKE ? ORDER BY person_name LIMIT 20", (f"%{query_str}%",)).fetchall()
+    
+    # Returns top 50 named people
+    if query_str:
+        results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name LIKE ? ORDER BY person_name LIMIT 50", (f"%{query_str}%",)).fetchall()
+    else:
+        results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name IS NOT NULL ORDER BY person_name LIMIT 50").fetchall()
     conn.close()
+    
     return jsonify([row[0] for row in results if row[0]])
 
 @app.route("/thumbnail")
@@ -527,7 +563,6 @@ def serve_thumbnail():
     
     if cache_path.exists(): return send_file(cache_path)
     
-    # Generate on the fly if it somehow missed the pre-generation phase
     if file_type == "image":
         try:
             with Image.open(file_path) as img:
@@ -549,12 +584,10 @@ def serve_file():
     if file_path and os.path.exists(file_path): return send_file(file_path)
     return "File not found", 404
 
-# --- NEW: PEOPLE UI & API ROUTES ---
+# --- PEOPLE UI & API ROUTES ---
 @app.route("/people")
 def people_manager():
     conn = get_db_connection()
-    
-    # 1. Fetch Unnamed Clusters (The Inbox)
     unnamed_query = """
         SELECT f.cluster_id, COUNT(f.id) as face_count, m.current_path as sample_path, m.file_type 
         FROM faces f JOIN media m ON f.media_id = m.id 
@@ -562,8 +595,6 @@ def people_manager():
         GROUP BY f.cluster_id ORDER BY face_count DESC
     """
     unnamed = conn.execute(unnamed_query).fetchall()
-    
-    # 2. Fetch Named People (The Gallery)
     named_query = """
         SELECT f.person_name, COUNT(f.id) as face_count, MIN(m.current_path) as sample_path, m.file_type 
         FROM faces f JOIN media m ON f.media_id = m.id 
@@ -571,7 +602,6 @@ def people_manager():
         GROUP BY f.person_name ORDER BY f.person_name ASC
     """
     named = conn.execute(named_query).fetchall()
-    
     conn.close()
     return render_template_string(PEOPLE_HTML_TEMPLATE, unnamed=unnamed, named=named)
 
@@ -580,9 +610,7 @@ def name_cluster():
     data = request.json
     cluster_id = data.get("cluster_id")
     person_name = data.get("person_name")
-    
-    if cluster_id is None or not person_name:
-        return jsonify({"error": "Invalid data"}), 400
+    if cluster_id is None or not person_name: return jsonify({"error": "Invalid data"}), 400
         
     conn = get_db_connection()
     conn.execute("UPDATE faces SET person_name = ? WHERE cluster_id = ?", (person_name.strip(), cluster_id))
@@ -605,7 +633,7 @@ def index():
     file_type = request.args.get("file_type", "")
     has_gps = request.args.get("has_gps", "")
     flash = request.args.get("flash", "")
-    person = request.args.get("person", "") # NEW Filter
+    person = request.args.get("person", "") 
     
     sort_param = request.args.get("sort", "date_desc")
     sort_mapping = {
@@ -617,17 +645,18 @@ def index():
     conditions = ""
     params = []
     
-    # NEW: Securely join the faces table if the user is filtering by a person
+    # --- UPGRADED: Partial and Multi-Person Logic ---
     if person:
         if person.startswith("cluster:"):
-            # Special case for viewing an unnamed cluster from the Inbox
             cluster_id = person.split(":")[1]
             conditions += " AND media.id IN (SELECT media_id FROM faces WHERE cluster_id = ?)"
             params.append(int(cluster_id))
         else:
-            # Standard search for a named person
-            conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name = ?)"
-            params.append(person)
+            # Allows comma-separated multi-person searching!
+            people_list = [p.strip() for p in person.split(",") if p.strip()]
+            for p in people_list:
+                conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name LIKE ?)"
+                params.append(f"%{p}%")
 
     if source: conditions += " AND source = ?"; params.append(source)
     if camera: conditions += " AND camera_model LIKE ?"; params.append(f"%{camera}%")
