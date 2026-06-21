@@ -4,6 +4,9 @@ import face_recognition
 import numpy as np
 from sklearn.cluster import DBSCAN
 from pathlib import Path
+import os
+import subprocess
+from PIL import Image, ImageOps
 
 BASE_DIR = Path.home() / "everything/personal/backup"
 DB_PATH = BASE_DIR / "media_index.db"
@@ -29,7 +32,7 @@ def clean_slate():
             box_right INTEGER,
             box_bottom INTEGER,
             box_left INTEGER,
-            FOREIGN KEY(media_id) REFERENCES media(id)
+            FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE
         )
     """)
     cursor.execute("CREATE INDEX idx_media_id ON faces(media_id)")
@@ -37,33 +40,78 @@ def clean_slate():
     cursor.execute("CREATE INDEX idx_cluster_id ON faces(cluster_id)")
     conn.commit()
 
-    print("\n--- Starting Fresh Extraction ---")
-    cursor.execute("SELECT id, current_path FROM media WHERE file_type IN ('image', 'video')")
+    print("\n--- Starting Fresh High-Res Extraction ---")
+    # Added file_type to the query so we know how to extract the 1200px frame
+    cursor.execute("SELECT id, current_path, file_type FROM media WHERE file_type IN ('image', 'video')")
     media_items = cursor.fetchall()
 
     faces_found = 0
-    for idx, (media_id, current_path) in enumerate(media_items, 1):
+    for idx, (media_id, current_path, file_type) in enumerate(media_items, 1):
         path_hash = hashlib.md5(current_path.encode('utf-8')).hexdigest()
-        thumbnail_path = THUMB_DIR / f"{path_hash}.jpg"
+        thumb_path = THUMB_DIR / f"{path_hash}.jpg"
 
-        if not thumbnail_path.exists(): continue
+        if not thumb_path.exists(): continue
 
         try:
-            image = face_recognition.load_image_file(str(thumbnail_path))
-            face_locations = face_recognition.face_locations(image)
-            face_encodings = face_recognition.face_encodings(image, known_face_locations=face_locations)
-            
-            for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
-                cursor.execute("""
-                    INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left) 
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (media_id, encoding.tobytes(), top, right, bottom, left))
-                faces_found += 1
+            # 1. Get the target thumbnail dimensions for the UI
+            with Image.open(thumb_path) as t_img:
+                thumb_w, thumb_h = t_img.size
+
+            img_array = None
+            ml_w, ml_h = 0, 0
+
+            # 2. Generate the 1200px Intermediate Analysis Canvas
+            if file_type == "image":
+                with Image.open(current_path) as img:
+                    img = ImageOps.exif_transpose(img)
+                    if img.mode != 'RGB': img = img.convert('RGB')
+                    
+                    orig_w, orig_h = img.size
+                    scale = min(1200 / orig_w, 1200 / orig_h)
+                    if scale > 1: scale = 1 
+                    
+                    ml_img = img.resize((int(orig_w * scale), int(orig_h * scale)), Image.Resampling.LANCZOS)
+                    ml_w, ml_h = ml_img.size
+                    img_array = np.array(ml_img)
+                    
+            elif file_type == "video":
+                temp_frame = BASE_DIR / f"temp_ml_frame_{media_id}.jpg"
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", current_path,
+                    "-ss", "00:00:00.100", "-vframes", "1",
+                    "-vf", "scale='min(1200,iw)':-1", str(temp_frame)
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                 
+                if temp_frame.exists():
+                    with Image.open(temp_frame) as img:
+                        ml_w, ml_h = img.size
+                        img_array = np.array(img)
+                    os.remove(temp_frame)
+
+            # 3. Extract faces from the high-res canvas and translate coordinates back down
+            if img_array is not None:
+                face_locations = face_recognition.face_locations(img_array)
+                face_encodings = face_recognition.face_encodings(img_array, known_face_locations=face_locations)
+                
+                if ml_w > 0:
+                    ratio = thumb_w / ml_w
+                    for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
+                        t_top = int(top * ratio)
+                        t_right = int(right * ratio)
+                        t_bottom = int(bottom * ratio)
+                        t_left = int(left * ratio)
+                        
+                        cursor.execute("""
+                            INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left, exclude_from_ml) 
+                            VALUES (?, ?, ?, ?, ?, ?, 0)
+                        """, (media_id, encoding.tobytes(), t_top, t_right, t_bottom, t_left))
+                        faces_found += 1
+                        
             if idx % 100 == 0:
                 print(f"Scanned {idx}/{len(media_items)}... found {faces_found} faces.")
                 conn.commit()
-        except Exception: pass
+        except Exception as e: 
+            print(f"Error processing ID {media_id}: {e}")
 
     conn.commit()
     print(f"Extraction Complete. Extracted {faces_found} faces with perfect coordinates.")
