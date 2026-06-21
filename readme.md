@@ -6,7 +6,7 @@ Instead of relying on cloud services, this tool uses a local SQLite database to 
 
 The intention behind this project is for me to be able to regularly take backups of my smartphone media into a staging folder divided into 3 folders: "me" for taking backup out of my phone's DCIM/Camera folder, "shared" for backup of any media folders that get shared with me by friends/family after an event or trip, and "misc" for media backed up from anywhere else (WhatsApp media, documents, audio, etc.). This tool then organizes the media from the staging folder into monthly folders and builds a SQLite DB table with all the metadata extracted from the files, helping keep an archival of the media. 
 
-*Note: The tool heavily compresses the files to enable keeping more files on a local system. This is safe because uncompressed backups should be kept on external drives. Use this tool for a highly accessible, redundant viewing archive, not as your only pristine copy (e.g., video compression intentionally drops original file metadata to save space).*
+*Note: The tool heavily compresses the files to enable keeping more files on a local system. But I am able to do this because I also have uncompressed backups on external drives. I would recommend you use the tool on redundant copies of your backup, not on the only copies.*
 
 ---
 
