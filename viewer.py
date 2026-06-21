@@ -59,6 +59,10 @@ HTML_TEMPLATE = """
         .autocomplete-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #333; word-break: break-all; color: #fff; font-size: 0.9em;}
         .autocomplete-item:hover { background-color: #007bff; }
         .autocomplete-item:last-child { border-bottom: none; }
+        
+        /* Drop-up class for the lightbox tagging so it doesn't get cut off */
+        .autocomplete-dropdown.drop-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
+        
         .loading-spinner { display: none; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #888; font-size: 0.8em; pointer-events: none; }
         
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 15px; }
@@ -83,13 +87,21 @@ HTML_TEMPLATE = """
         .page-info { color: #aaa; font-size: 0.9em; font-family: monospace; }
 
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.95); justify-content: center; align-items: center; backdrop-filter: blur(5px); }
-        .modal-content { max-width: 90%; max-height: 90vh; object-fit: contain; border-radius: 4px; box-shadow: 0 4px 25px rgba(0,0,0,0.8); display: none; }
+        .modal-content { max-width: 90%; max-height: 85vh; object-fit: contain; border-radius: 4px; box-shadow: 0 4px 25px rgba(0,0,0,0.8); display: none; margin-bottom: 50px; }
         .modal-close { position: absolute; top: 20px; right: 30px; color: #fff; font-size: 40px; font-weight: bold; cursor: pointer; user-select: none; z-index: 1001; }
         .nav-btn { position: absolute; top: 50%; transform: translateY(-50%); color: #fff; font-size: 50px; cursor: pointer; user-select: none; padding: 20px; z-index: 1001; transition: 0.2s; }
         .nav-btn:hover { color: #007bff; }
         .prev-btn { left: 10px; }
         .next-btn { right: 10px; }
         .counter { position: absolute; top: 25px; left: 30px; color: #aaa; font-size: 1.2em; font-family: monospace; }
+
+        /* Manual Tagging UI Overlay */
+        .lightbox-tag-bar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 1002; display: flex; gap: 10px; background: rgba(30, 30, 30, 0.85); padding: 10px; border-radius: 8px; border: 1px solid #444; backdrop-filter: blur(10px); }
+        .lightbox-tag-bar input { width: 220px; background: #121212; border: 1px solid #555; color: white; padding: 8px 12px; border-radius: 4px; outline: none; }
+        .lightbox-tag-bar input:focus { border-color: #00bfff; }
+        .lightbox-tag-bar button { height: auto; padding: 8px 15px; font-size: 0.9em; background: #28a745; transition: 0.2s; }
+        .lightbox-tag-bar button:hover { background: #218838; }
+        .lightbox-tag-bar button.success { background: #007bff; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -225,13 +237,21 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
-    <div id="lightboxModal" class="modal" onclick="closeLightbox()">
+    <div id="lightboxModal" class="modal" onclick="closeLightbox(event)">
         <span class="counter" id="modalCounter"></span>
-        <span class="modal-close">&times;</span>
+        <span class="modal-close" onclick="closeLightbox(event)">&times;</span>
         <div class="nav-btn prev-btn" onclick="navigate(-1, event)">&#10094;</div>
         <img class="modal-content" id="modalImg" onclick="event.stopPropagation();">
         <video class="modal-content" id="modalVid" controls onclick="event.stopPropagation();"></video>
         <div class="nav-btn next-btn" onclick="navigate(1, event)">&#10095;</div>
+        
+        <div class="lightbox-tag-bar" onclick="event.stopPropagation();">
+            <div class="autocomplete-wrapper" style="overflow: visible;">
+                <input type="text" id="lightboxTagInput" placeholder="Manually tag someone..." autocomplete="off">
+                <div id="lightboxTagDropdown" class="autocomplete-dropdown drop-up"></div>
+            </div>
+            <button id="lightboxTagBtn" onclick="submitManualTag()">Add Tag</button>
+        </div>
     </div>
 
     <script>
@@ -241,7 +261,7 @@ HTML_TEMPLATE = """
             window.location.href = url.toString();
         }
 
-        // --- UPGRADED: Multi-Select & Focus-to-Show Autocomplete Engine ---
+        // Autocomplete Engine
         function setupApiAutocomplete(inputId, dropdownId, apiEndpoint, isMulti = false) {
             const inputEl = document.getElementById(inputId);
             const dropdownEl = document.getElementById(dropdownId);
@@ -272,7 +292,6 @@ HTML_TEMPLATE = """
                             
                             itemDiv.addEventListener("click", function(e) {
                                 if (isMulti) {
-                                    // Comma-separated appending logic
                                     const parts = inputEl.value.split(",");
                                     parts.pop(); 
                                     parts.push(this.innerText);
@@ -281,7 +300,7 @@ HTML_TEMPLATE = """
                                     inputEl.value = this.innerText;
                                 }
                                 dropdownEl.style.display = "none";
-                                inputEl.focus(); // Keep the cursor in the box
+                                inputEl.focus(); 
                                 e.stopPropagation();
                             });
                             dropdownEl.appendChild(itemDiv);
@@ -300,14 +319,13 @@ HTML_TEMPLATE = """
                 let query = this.value;
                 if (isMulti) {
                     const parts = query.split(",");
-                    query = parts[parts.length - 1].trim(); // Only search the text after the last comma
+                    query = parts[parts.length - 1].trim(); 
                 } else {
                     query = query.trim();
                 }
                 timeoutId = setTimeout(() => fetchSuggestions(query), 150); 
             });
 
-            // Trigger fetch immediately when the user clicks the box
             inputEl.addEventListener("focus", function() {
                 let query = this.value;
                 if (isMulti) {
@@ -326,11 +344,11 @@ HTML_TEMPLATE = """
             });
         }
 
-        // Initialize with isMulti set to TRUE only for the Person box
         setupApiAutocomplete("personInput", "personDropdown", "/api/suggest_person", true);
         setupApiAutocomplete("filenameInput", "filenameDropdown", "/api/suggest?column=original_name", false);
         setupApiAutocomplete("cameraInput", "cameraDropdown", "/api/suggest?column=camera_model", false);
         setupApiAutocomplete("locationInput", "locationDropdown", "/api/suggest?column=location_name", false);
+        setupApiAutocomplete("lightboxTagInput", "lightboxTagDropdown", "/api/suggest_person", false);
 
         const galleryData = [
             {% for item in results %}
@@ -343,6 +361,8 @@ HTML_TEMPLATE = """
         const modalImg = document.getElementById('modalImg');
         const modalVid = document.getElementById('modalVid');
         const counter = document.getElementById('modalCounter');
+        const tagInput = document.getElementById('lightboxTagInput');
+        const tagBtn = document.getElementById('lightboxTagBtn');
 
         function openLightbox(index) {
             if (index < 0 || index >= galleryData.length) return;
@@ -360,11 +380,18 @@ HTML_TEMPLATE = """
             counter.innerText = `${currentIndex + 1} / ${galleryData.length}`;
             modal.style.display = 'flex';
             document.body.style.overflow = 'hidden';
+            
+            // Reset tag UI
+            tagInput.value = '';
+            tagBtn.innerText = 'Add Tag';
+            tagBtn.className = '';
         }
 
-        function closeLightbox() {
+        function closeLightbox(event) {
+            if(event && event.target !== modal && event.target !== document.querySelector('.modal-close')) return;
             modal.style.display = 'none'; modalVid.pause(); modalVid.src = ''; modalImg.src = '';
             document.body.style.overflow = 'auto';
+            document.getElementById('lightboxTagDropdown').style.display = 'none';
         }
 
         function navigate(direction, event) {
@@ -380,11 +407,49 @@ HTML_TEMPLATE = """
 
         document.addEventListener('keydown', function(event) {
             if (modal.style.display === 'flex') {
+                if (document.activeElement === tagInput) {
+                    if (event.key === "Enter") submitManualTag();
+                    return;
+                }
                 if (event.key === "Escape") closeLightbox();
                 else if (event.key === "ArrowRight") navigate(1, null);
                 else if (event.key === "ArrowLeft") navigate(-1, null);
             }
         });
+
+        // Submit Manual Tag
+        async function submitManualTag() {
+            const name = tagInput.value.trim();
+            if (!name) return;
+
+            const currentItem = galleryData[currentIndex];
+            const urlParams = new URLSearchParams(currentItem.src.split('?')[1]);
+            const filePath = urlParams.get('path');
+
+            tagBtn.innerText = 'Saving...';
+
+            try {
+                const response = await fetch('/api/add_manual_tag', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: filePath, person_name: name })
+                });
+                
+                if (response.ok) {
+                    tagInput.value = '';
+                    tagBtn.innerText = 'Added!';
+                    tagBtn.className = 'success';
+                    setTimeout(() => { 
+                        tagBtn.innerText = 'Add Tag'; 
+                        tagBtn.className = ''; 
+                    }, 2000);
+                } else {
+                    tagBtn.innerText = 'Error';
+                }
+            } catch (error) {
+                tagBtn.innerText = 'Error';
+            }
+        }
     </script>
 </body>
 </html>
@@ -529,25 +594,10 @@ def api_suggest():
     if column not in valid_columns: return jsonify([])
     
     conn = get_db_connection()
-    # Now returns top 50 matches so the click-to-open dropdown is fully populated
     if query_str:
         results = conn.execute(f"SELECT DISTINCT {column} FROM media WHERE {column} LIKE ? ORDER BY {column} LIMIT 50", (f"%{query_str}%",)).fetchall()
     else:
         results = conn.execute(f"SELECT DISTINCT {column} FROM media WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 50").fetchall()
-    conn.close()
-    
-    return jsonify([row[0] for row in results if row[0]])
-
-@app.route("/api/suggest_person")
-def api_suggest_person():
-    query_str = request.args.get("q", "")
-    conn = get_db_connection()
-    
-    # Returns top 50 named people
-    if query_str:
-        results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name LIKE ? ORDER BY person_name LIMIT 50", (f"%{query_str}%",)).fetchall()
-    else:
-        results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name IS NOT NULL ORDER BY person_name LIMIT 50").fetchall()
     conn.close()
     
     return jsonify([row[0] for row in results if row[0]])
@@ -591,10 +641,11 @@ def people_manager():
     unnamed_query = """
         SELECT f.cluster_id, COUNT(f.id) as face_count, m.current_path as sample_path, m.file_type 
         FROM faces f JOIN media m ON f.media_id = m.id 
-        WHERE f.person_name IS NULL AND f.cluster_id != -1 
+        WHERE f.person_name IS NULL AND f.cluster_id != -1 AND f.is_manual = 0
         GROUP BY f.cluster_id ORDER BY face_count DESC
     """
     unnamed = conn.execute(unnamed_query).fetchall()
+    
     named_query = """
         SELECT f.person_name, COUNT(f.id) as face_count, MIN(m.current_path) as sample_path, m.file_type 
         FROM faces f JOIN media m ON f.media_id = m.id 
@@ -604,6 +655,43 @@ def people_manager():
     named = conn.execute(named_query).fetchall()
     conn.close()
     return render_template_string(PEOPLE_HTML_TEMPLATE, unnamed=unnamed, named=named)
+
+@app.route("/api/add_manual_tag", methods=["POST"])
+def add_manual_tag():
+    data = request.json
+    file_path = data.get("path")
+    person_name = data.get("person_name")
+    
+    if not file_path or not person_name:
+        return jsonify({"error": "Missing data"}), 400
+
+    conn = get_db_connection()
+    media_row = conn.execute("SELECT id FROM media WHERE current_path = ?", (file_path,)).fetchone()
+    
+    if media_row:
+        media_id = media_row[0]
+        # Check to prevent duplicate manual tags on the same photo
+        existing = conn.execute("SELECT 1 FROM faces WHERE media_id = ? AND person_name = ?", (media_id, person_name.strip())).fetchone()
+        if not existing:
+            # Insert the tag with is_manual = 1 so DBSCAN ignores it
+            conn.execute("INSERT INTO faces (media_id, person_name, is_manual) VALUES (?, ?, 1)", (media_id, person_name.strip()))
+            conn.commit()
+            
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route("/api/suggest_person")
+def api_suggest_person():
+    query_str = request.args.get("q", "")
+    conn = get_db_connection()
+    
+    if query_str:
+        results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name LIKE ? ORDER BY person_name LIMIT 50", (f"%{query_str}%",)).fetchall()
+    else:
+        results = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name IS NOT NULL ORDER BY person_name LIMIT 50").fetchall()
+        
+    conn.close()
+    return jsonify([row[0] for row in results if row[0]])
 
 @app.route("/api/name_cluster", methods=["POST"])
 def name_cluster():
@@ -645,14 +733,12 @@ def index():
     conditions = ""
     params = []
     
-    # --- UPGRADED: Partial and Multi-Person Logic ---
     if person:
         if person.startswith("cluster:"):
             cluster_id = person.split(":")[1]
             conditions += " AND media.id IN (SELECT media_id FROM faces WHERE cluster_id = ?)"
             params.append(int(cluster_id))
         else:
-            # Allows comma-separated multi-person searching!
             people_list = [p.strip() for p in person.split(",") if p.strip()]
             for p in people_list:
                 conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name LIKE ?)"
