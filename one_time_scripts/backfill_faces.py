@@ -78,7 +78,7 @@ def backfill_faces_and_cluster():
 
     # --- Phase 2: DBSCAN Clustering ---
     print("\n--- Phase 2: Facial Clustering ---")
-    cursor.execute("SELECT id, encoding FROM faces")
+    cursor.execute("SELECT id, encoding FROM faces WHERE is_manual = 0 AND encoding IS NOT NULL")
     rows = cursor.fetchall()
 
     if not rows:
