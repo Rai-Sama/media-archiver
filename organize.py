@@ -60,7 +60,8 @@ def init_db():
             location_name TEXT
         )
     """)
-    # Add Facial Recognition Table
+    
+    # FIXED: Fully synced schema matching the viewer.py requirements
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS faces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +69,12 @@ def init_db():
             encoding BLOB,
             cluster_id INTEGER,
             person_name TEXT,
-            FOREIGN KEY(media_id) REFERENCES media(id)
+            exclude_from_ml INTEGER DEFAULT 0,
+            box_top INTEGER,
+            box_right INTEGER,
+            box_bottom INTEGER,
+            box_left INTEGER,
+            FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE
         )
     """)
     
@@ -288,30 +294,71 @@ def generate_thumbnail(file_path, file_type):
     except Exception:
         return None
 
-
-def extract_faces(media_id, thumbnail_path, cursor):
-    if not thumbnail_path or not thumbnail_path.exists():
+# --- NEW: 1200px Intermediate Analysis Canvas ---
+def extract_faces(media_id, final_target_path, file_type, thumb_path, cursor):
+    if not thumb_path or not thumb_path.exists():
         return
         
     try:
-        image = face_recognition.load_image_file(str(thumbnail_path))
-        
-        # 1. Find the physical locations (bounding boxes) of the faces
-        face_locations = face_recognition.face_locations(image)
-        # 2. Extract the math vectors based on those exact locations
-        face_encodings = face_recognition.face_encodings(image, known_face_locations=face_locations)
-        
-        # 3. Save both the vector and the box to the database
-        for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
-            encoding_blob = encoding.tobytes()
-            cursor.execute("""
-                INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left) 
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (media_id, encoding_blob, top, right, bottom, left))
+        # We fetch the UI's thumbnail dimensions first to ensure we can mathematically 
+        # project our high-res bounding boxes down to the UI's scale
+        with Image.open(thumb_path) as t_img:
+            thumb_w, thumb_h = t_img.size
+
+        img_array = None
+        ml_w, ml_h = 0, 0
+
+        if file_type == "image":
+            with Image.open(final_target_path) as img:
+                img = ImageOps.exif_transpose(img)
+                if img.mode != 'RGB': img = img.convert('RGB')
+                
+                orig_w, orig_h = img.size
+                
+                # Cap the maximum dimension at 1200px to protect the CPU
+                scale = min(1200 / orig_w, 1200 / orig_h)
+                if scale > 1: scale = 1 # Don't upscale tiny images
+                
+                ml_img = img.resize((int(orig_w * scale), int(orig_h * scale)), Image.Resampling.LANCZOS)
+                ml_w, ml_h = ml_img.size
+                img_array = np.array(ml_img)
+                
+        elif file_type == "video":
+            # Extract a 1200px high-res temp frame using FFmpeg
+            temp_frame = BASE_DIR / f"temp_ml_frame_{media_id}.jpg"
+            subprocess.run([
+                "ffmpeg", "-y", "-i", str(final_target_path),
+                "-ss", "00:00:00.100", "-vframes", "1",
+                "-vf", "scale='min(1200,iw)':-1", str(temp_frame)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             
+            if temp_frame.exists():
+                with Image.open(temp_frame) as img:
+                    ml_w, ml_h = img.size
+                    img_array = np.array(img)
+                os.remove(temp_frame)
+
+        if img_array is not None:
+            face_locations = face_recognition.face_locations(img_array)
+            face_encodings = face_recognition.face_encodings(img_array, known_face_locations=face_locations)
+            
+            # The magical coordinate translation step
+            # Scales the 1200px boxes down to perfectly fit over the 400px UI thumbnails
+            ratio = thumb_w / ml_w
+            
+            for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
+                t_top = int(top * ratio)
+                t_right = int(right * ratio)
+                t_bottom = int(bottom * ratio)
+                t_left = int(left * ratio)
+                
+                cursor.execute("""
+                    INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left, exclude_from_ml) 
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                """, (media_id, encoding.tobytes(), t_top, t_right, t_bottom, t_left))
+                
     except Exception as e:
         print(f"Face extraction failed for ID {media_id}: {e}")
-
 
 def process_staging():
     print("--- Starting Media Pipeline ---")
@@ -331,6 +378,7 @@ def process_staging():
         for file_path in folder_path.rglob("*"):
             if file_path.is_dir(): continue
 
+            # Pre-filter check
             cursor.execute("SELECT 1 FROM media WHERE original_name = ?", (file_path.name,))
             if cursor.fetchone():
                 duplicates_skipped += 1
@@ -385,8 +433,9 @@ def process_staging():
                 except Exception:
                     pass
             
+            # FIXED: Safe pure INSERT protects Foreign Key mappings
             cursor.execute("""
-                INSERT OR REPLACE INTO media 
+                INSERT INTO media 
                 (original_name, current_path, file_type, source, date_taken, 
                 file_size_kb, width, height, camera_model, f_stop, exposure_time, 
                 iso, flash_fired, latitude, longitude, location_name)
@@ -401,7 +450,7 @@ def process_staging():
             media_id = cursor.lastrowid
             
             if thumbnail_path:
-                extract_faces(media_id, thumbnail_path, cursor)
+                extract_faces(media_id, final_target_path, file_type, thumbnail_path, cursor)
                 
             files_processed += 1
 
@@ -418,7 +467,8 @@ def cluster_faces():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, encoding FROM faces WHERE is_manual = 0 AND encoding IS NOT NULL")
+    # Filters out manual tags automatically
+    cursor.execute("SELECT id, encoding FROM faces WHERE exclude_from_ml = 0 AND encoding IS NOT NULL")
     rows = cursor.fetchall()
 
     if not rows:
@@ -444,7 +494,6 @@ def cluster_faces():
 
     print(f"Running DBSCAN algorithm on {len(encodings)} faces...")
     
-    # eps=0.45 is strict enough to prevent false matches, loose enough to catch different angles
     clt = DBSCAN(metric="euclidean", n_jobs=-1, eps=0.45, min_samples=3)
     clt.fit(encodings)
 
@@ -464,5 +513,4 @@ def cluster_faces():
 if __name__ == "__main__":
     init_db()
     process_staging()
-    # Execute the clustering instantly after the staging queue is processed
     cluster_faces()
