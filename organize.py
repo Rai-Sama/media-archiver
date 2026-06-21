@@ -410,7 +410,7 @@ def cluster_faces():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, encoding FROM faces")
+    cursor.execute("SELECT id, encoding FROM faces WHERE is_manual = 0 AND encoding IS NOT NULL")
     rows = cursor.fetchall()
 
     if not rows:
