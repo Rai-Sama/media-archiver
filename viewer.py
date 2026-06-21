@@ -76,10 +76,11 @@ HTML_TEMPLATE = """
 
         /* Lightbox */
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.95); justify-content: center; align-items: center; backdrop-filter: blur(5px); }
-        .modal-content-wrapper { position: relative; max-width: 90%; max-height: 85vh; display: inline-block; margin-bottom: 50px; user-select: none; }
-        .modal-content { max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 4px; box-shadow: 0 4px 25px rgba(0,0,0,0.8); display: none; }
+        .modal-content-wrapper { position: relative; max-width: 90%; max-height: 85vh; display: inline-block; margin-bottom: 50px; overflow: hidden; }
+        .modal-content { max-width: 100%; max-height: 85vh; object-fit: contain; border-radius: 4px; box-shadow: 0 4px 25px rgba(0,0,0,0.8); display: none; transform-origin: 0 0; }
         .modal-close { position: absolute; top: 20px; right: 30px; color: #fff; font-size: 40px; font-weight: bold; cursor: pointer; user-select: none; z-index: 1001; }
-        .nav-btn { position: absolute; top: 50%; transform: translateY(-50%); color: #fff; font-size: 50px; cursor: pointer; padding: 20px; z-index: 1001; transition: 0.2s; }
+        .nav-btn { position: absolute; top: 50%; transform: translateY(-50%); color: #fff; font-size: 50px; cursor: pointer; padding: 20px; z-index: 1001; transition: 0.2s; user-select: none; }
+        .nav-btn:hover { color: #00bfff; }
         
         .floating-tag-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 1002; display: flex; align-items: center; gap: 15px; background: rgba(30, 30, 30, 0.95); padding: 15px 20px; border-radius: 8px; border: 1px solid #555; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
         .floating-tag-bar input[type="text"] { width: 200px; background: #121212; border: 1px solid #555; color: white; padding: 10px; border-radius: 4px; }
@@ -97,6 +98,11 @@ HTML_TEMPLATE = """
         .face-box .box-label { background: rgba(0, 0, 0, 0.8); color: white; font-size: 12px; padding: 2px 6px; border-radius: 4px; margin-bottom: -25px; white-space: nowrap; }
         .face-box.tagged { border-color: rgba(40, 167, 69, 0.8); background: rgba(40, 167, 69, 0.1); }
         .face-box.tagged:hover { border-color: #28a745; background: rgba(40, 167, 69, 0.3); }
+
+        /* Delete Button for Boxes */
+        .delete-box-btn { position: absolute; top: -12px; right: -12px; background: #dc3545; color: white; border-radius: 50%; width: 24px; height: 24px; text-align: center; line-height: 22px; font-weight: bold; cursor: pointer; font-size: 14px; display: none; z-index: 11; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
+        .face-box:hover .delete-box-btn { display: block; }
+        .delete-box-btn:hover { background: #c82333; transform: scale(1.1); }
 
         #boxTagger { position: absolute; z-index: 1003; background: #1e1e1e; border: 1px solid #444; border-radius: 6px; padding: 10px; display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.8); }
         #boxTagger input { background: #121212; border: 1px solid #555; color: white; padding: 6px 10px; border-radius: 4px; width: 150px; outline: none;}
@@ -232,9 +238,7 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
-    <!-- LIGHTBOX -->
     <div id="lightboxModal" class="modal" onclick="closeLightbox(event)">
-        <span class="counter" id="modalCounter"></span>
         <span class="modal-close" onclick="closeLightbox(event)">&times;</span>
         <div class="nav-btn prev-btn" style="left:10px;" onclick="navigate(-1, event)">&#10094;</div>
         
@@ -271,7 +275,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- BATCH TAGGING BAR -->
     <div id="batchTagBar" class="floating-tag-bar" style="display: none;">
         <span id="batchCount" style="color: #00bfff; font-weight: bold; width: 60px;">0 Selected</span>
         <div class="autocomplete-wrapper" style="overflow: visible;">
@@ -330,10 +333,52 @@ HTML_TEMPLATE = """
         const faceOverlay = document.getElementById('faceOverlay');
         const boxTagger = document.getElementById('boxTagger');
 
+        // --- ZOOM & PAN VARIABLES ---
+        let imgScale = 1, imgPointX = 0, imgPointY = 0, panningImg = false, startImgX = 0, startImgY = 0;
+
+        function setImgTransform() {
+            modalImg.style.transform = `translate(${imgPointX}px, ${imgPointY}px) scale(${imgScale})`;
+            modalImg.style.cursor = imgScale > 1 ? (panningImg ? 'grabbing' : 'grab') : 'default';
+        }
+
+        modalImg.addEventListener('wheel', (e) => {
+            if (inspectorActive) return; 
+            e.preventDefault();
+            const xs = (e.clientX - imgPointX) / imgScale;
+            const ys = (e.clientY - imgPointY) / imgScale;
+            const delta = (e.wheelDelta ? e.wheelDelta : -e.deltaY);
+            
+            (delta > 0) ? (imgScale *= 1.2) : (imgScale /= 1.2);
+            imgScale = Math.max(1, Math.min(imgScale, 12)); 
+            
+            if (imgScale === 1) { imgPointX = 0; imgPointY = 0; } 
+            else { imgPointX = e.clientX - xs * imgScale; imgPointY = e.clientY - ys * imgScale; }
+            setImgTransform();
+        });
+
+        modalImg.addEventListener('mousedown', (e) => {
+            if (inspectorActive || imgScale === 1) return;
+            e.preventDefault();
+            startImgX = e.clientX - imgPointX; startImgY = e.clientY - imgPointY;
+            panningImg = true; setImgTransform();
+        });
+
+        window.addEventListener('mouseup', () => { if(panningImg) { panningImg = false; setImgTransform(); } });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!panningImg || inspectorActive) return;
+            e.preventDefault();
+            imgPointX = e.clientX - startImgX; imgPointY = e.clientY - startImgY;
+            setImgTransform();
+        });
+
         function openLightbox(index) {
             if (index < 0 || index >= galleryData.length || galleryData[index].type === 'document') return;
             currentIndex = index;
             const item = galleryData[currentIndex];
+            
+            imgScale = 1; imgPointX = 0; imgPointY = 0; setImgTransform();
+            
             modalImg.style.display = 'none'; modalVid.style.display = 'none'; modalVid.pause();
             inspectorActive = false; document.getElementById('inspectToggleBtn').classList.remove('active');
             faceOverlay.style.display = 'none'; boxTagger.style.display = 'none';
@@ -342,7 +387,6 @@ HTML_TEMPLATE = """
             if (item.type === 'image') { modalImg.src = item.src; modalImg.style.display = 'block'; } 
             else if (item.type === 'video') { modalVid.src = item.src; modalVid.style.display = 'block'; modalVid.play(); }
             
-            document.getElementById('modalCounter').innerText = `${currentIndex + 1} / ${galleryData.length}`;
             modal.style.display = 'flex'; document.body.style.overflow = 'hidden';
             document.getElementById('lightboxTagInput').value = '';
         }
@@ -422,7 +466,6 @@ HTML_TEMPLATE = """
             openBoxTagger(null, '', e.clientX, e.clientY);
         });
 
-
         async function toggleInspector() {
             inspectorActive = !inspectorActive;
             const btn = document.getElementById('inspectToggleBtn');
@@ -433,28 +476,35 @@ HTML_TEMPLATE = """
                 faceOverlay.style.pointerEvents = 'none';
                 return; 
             }
+            
+            imgScale = 1; imgPointX = 0; imgPointY = 0; setImgTransform();
+            
             btn.classList.add('active'); 
             faceOverlay.style.display = 'block'; 
             faceOverlay.style.pointerEvents = 'auto'; 
             faceOverlay.style.cursor = 'crosshair';
-            faceOverlay.innerHTML = ''; 
+            
+            faceOverlay.innerHTML = '<div style="position:absolute; top:20px; left:50%; transform:translateX(-50%); background:rgba(0,191,255,0.9); color:#000; font-weight:bold; padding:8px 15px; border-radius:20px; font-size:14px; pointer-events:none; z-index:1000; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">✏️ Click & Drag to manually select a missing face</div>';
 
             if(galleryData[currentIndex].type !== 'image') { alert("Inspector supports Images only."); toggleInspector(); return; }
 
             const urlParams = new URLSearchParams(galleryData[currentIndex].src.split('?')[1]);
             try {
+                // FIXED PARSING: The backend returns {"faces": [...], "thumb_w": X, "thumb_h": Y}
                 const res = await fetch(`/api/get_faces?path=${encodeURIComponent(urlParams.get('path'))}`);
-                const faces = await res.json();
+                const data = await res.json();
                 
-                const natW = modalImg.naturalWidth; const natH = modalImg.naturalHeight;
-                const scale = Math.min(400 / natW, 400 / natH);
-                const thumbW = natW * scale;
-                const thumbH = natH * scale;
+                const thumbW = data.thumb_w;
+                const thumbH = data.thumb_h;
 
-                faces.forEach(face => {
+                data.faces.forEach(face => {
                     if(face.box_top === null || face.box_top === undefined) return;
-                    const topPct = (face.box_top / thumbH) * 100; const leftPct = (face.box_left / thumbW) * 100;
-                    const widthPct = ((face.box_right - face.box_left) / thumbW) * 100; const heightPct = ((face.box_bottom - face.box_top) / thumbH) * 100;
+                    
+                    // Fixed translation math uses the backend's explicit thumbnail dimensions
+                    const topPct = (face.box_top / thumbH) * 100; 
+                    const leftPct = (face.box_left / thumbW) * 100;
+                    const widthPct = ((face.box_right - face.box_left) / thumbW) * 100; 
+                    const heightPct = ((face.box_bottom - face.box_top) / thumbH) * 100;
 
                     const box = document.createElement('div');
                     box.className = `face-box ${face.person_name ? 'tagged' : ''}`;
@@ -464,10 +514,25 @@ HTML_TEMPLATE = """
                     if(face.person_name) {
                         const label = document.createElement('div'); label.className = 'box-label'; label.innerText = face.person_name; box.appendChild(label);
                     }
+                    
+                    const deleteBtn = document.createElement('div');
+                    deleteBtn.className = 'delete-box-btn';
+                    deleteBtn.innerText = '×';
+                    deleteBtn.title = 'Remove this face box';
+                    deleteBtn.addEventListener('click', async (e) => {
+                        e.stopPropagation();
+                        const delRes = await fetch('/api/delete_face', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ face_id: face.id })
+                        });
+                        if(delRes.ok) box.remove();
+                    });
+                    box.appendChild(deleteBtn);
+
                     box.addEventListener('click', (e) => { e.stopPropagation(); openBoxTagger(face.id, face.person_name, e.clientX, e.clientY); });
                     faceOverlay.appendChild(box);
                 });
-            } catch(e) { console.error("Error fetching faces"); }
+            } catch(e) { console.error("Error fetching faces", e); }
         }
 
         function openBoxTagger(faceId, existingName, clickX, clickY) {
@@ -585,6 +650,24 @@ HTML_TEMPLATE = """
         setupApiAutocomplete("filenameInput", "filenameDropdown", "/api/suggest?column=original_name", false);
         setupApiAutocomplete("cameraInput", "cameraDropdown", "/api/suggest?column=camera_model", false);
         setupApiAutocomplete("locationInput", "locationDropdown", "/api/suggest?column=location_name", false);
+
+        document.addEventListener('keydown', function(event) {
+            if (modal.style.display === 'flex') {
+                const isInputActive = document.activeElement && document.activeElement.tagName === 'INPUT';
+                
+                if (isInputActive) {
+                    if (event.key === "Enter") {
+                        if(document.activeElement.id === 'boxTagInput') submitBoxTag();
+                        else if(document.activeElement.id === 'lightboxTagInput') submitTag(false);
+                    }
+                    return; 
+                }
+                
+                if (event.key === "Escape") closeLightbox();
+                else if (event.key === "ArrowRight") navigate(1, null);
+                else if (event.key === "ArrowLeft") navigate(-1, null);
+            }
+        });
     </script>
 </body>
 </html>
@@ -708,18 +791,77 @@ def api_suggest():
     conn.close()
     return jsonify([r[0] for r in res if r[0]])
 
+@app.route("/api/delete_face", methods=["POST"])
+def delete_face():
+    face_id = request.json.get("face_id")
+    if not face_id: return jsonify({"error": "Missing ID"}), 400
+    conn = get_db_connection()
+    conn.execute("DELETE FROM faces WHERE id = ?", (face_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
 @app.route("/api/get_faces")
 def get_faces():
     file_path = request.args.get("path")
-    if not file_path: return jsonify([])
+    if not file_path: return jsonify({"faces": [], "thumb_w": 400, "thumb_h": 400})
+    
     conn = get_db_connection()
     media_row = conn.execute("SELECT id FROM media WHERE current_path = ?", (file_path,)).fetchone()
     if not media_row: 
         conn.close()
-        return jsonify([])
-    faces = conn.execute("SELECT id, box_top, box_right, box_bottom, box_left, person_name FROM faces WHERE media_id = ? AND box_top IS NOT NULL", (media_row['id'],)).fetchall()
+        return jsonify({"faces": [], "thumb_w": 400, "thumb_h": 400})
+        
+    media_id = media_row['id']
+    
+    path_hash = hashlib.md5(file_path.encode('utf-8')).hexdigest()
+    thumb_path = THUMB_DIR / f"{path_hash}.jpg"
+    
+    tw, th = 400, 400
+    
+    if thumb_path.exists():
+        try:
+            # We open it with Pillow first to guarantee we send the exact dimensions to JS
+            with Image.open(thumb_path) as img:
+                tw, th = img.size
+                
+            import face_recognition
+            image = face_recognition.load_image_file(str(thumb_path))
+            
+            face_locations = face_recognition.face_locations(image)
+
+            if face_locations:
+                db_faces = conn.execute("SELECT box_top, box_left FROM faces WHERE media_id = ? AND box_top IS NOT NULL", (media_id,)).fetchall()
+                
+                locations_to_insert = []
+                for (top, right, bottom, left) in face_locations:
+                    is_new = True
+                    for db_face in db_faces:
+                        if abs(db_face['box_top'] - top) < 15 and abs(db_face['box_left'] - left) < 15:
+                            is_new = False
+                            break
+                    if is_new:
+                        locations_to_insert.append((top, right, bottom, left))
+
+                if locations_to_insert:
+                    new_encodings = face_recognition.face_encodings(image, known_face_locations=locations_to_insert)
+                    for (top, right, bottom, left), encoding in zip(locations_to_insert, new_encodings):
+                        conn.execute("""
+                            INSERT INTO faces (media_id, box_top, box_right, box_bottom, box_left, encoding, exclude_from_ml)
+                            VALUES (?, ?, ?, ?, ?, ?, 0)
+                        """, (media_id, top, right, bottom, left, encoding.tobytes()))
+                    conn.commit()
+        except Exception as e:
+            print(f"Live scan engine error: {e}")
+
+    faces = conn.execute("SELECT id, box_top, box_right, box_bottom, box_left, person_name FROM faces WHERE media_id = ? AND box_top IS NOT NULL", (media_id,)).fetchall()
     conn.close()
-    return jsonify([dict(f) for f in faces])
+    
+    return jsonify({
+        "faces": [dict(f) for f in faces],
+        "thumb_w": tw,
+        "thumb_h": th
+    })
 
 @app.route("/api/tag_specific_face", methods=["POST"])
 def tag_specific_face():
@@ -770,7 +912,6 @@ def add_custom_face():
             right = max(0, min(w, int((box['right_pct'] / 100) * w)))
             
             if top >= bottom or left >= right:
-                print("Rejected: User drew an invalid/zero-area bounding box.")
                 conn.close()
                 return jsonify({"error": "Invalid bounding box area"}), 400
             
@@ -780,10 +921,8 @@ def add_custom_face():
                     encoding_blob = encodings[0].tobytes()
                 else:
                     exclude_from_ml = 1
-                    print(f"Warning: Could not extract ML vector from the box. Tag saved as manual-only.")
                     
         except Exception as e:
-            print(f"Extraction failure: {e}")
             exclude_from_ml = 1 
 
     conn.execute("""
@@ -831,10 +970,8 @@ def add_manual_tag():
 @app.route("/api/name_cluster", methods=["POST"])
 def name_cluster():
     data = request.json
-    
     if data.get("cluster_id") is None or not data.get("person_name"): 
         return jsonify({"error": "Invalid data"}), 400
-        
     conn = get_db_connection()
     conn.execute("UPDATE faces SET person_name = ? WHERE cluster_id = ?", (data["person_name"].strip(), data["cluster_id"]))
     conn.commit()
