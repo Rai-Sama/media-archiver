@@ -15,6 +15,7 @@ import exifread
 import face_recognition
 import numpy as np
 from sklearn.cluster import DBSCAN
+import concurrent.futures
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -61,7 +62,6 @@ def init_db():
         )
     """)
     
-    # FIXED: Fully synced schema matching the viewer.py requirements
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS faces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,7 +102,6 @@ def get_rich_metadata(file_path, file_type, ext):
     if file_type in ["document", "audio"]:
         return meta
 
-    # --- RAW PROCESSING ---
     if ext in ['.dng', '.cr2', '.nef', '.arw']:
         try:
             with open(file_path, 'rb') as f:
@@ -115,7 +114,6 @@ def get_rich_metadata(file_path, file_type, ext):
             pass
         return meta
 
-    # --- VIDEO PROCESSING ---
     if file_type == "video":
         try:
             cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(file_path)]
@@ -124,13 +122,10 @@ def get_rich_metadata(file_path, file_type, ext):
             
             if "format" in data and "tags" in data["format"]:
                 tags = {k.lower(): v for k, v in data["format"]["tags"].items()}
-                
                 raw_date = tags.get("creation_time")
                 if raw_date:
                     meta["date_taken"] = raw_date.replace("T", " ")[:19]
-                
                 meta["camera_model"] = tags.get("model") or tags.get("com.android.model") or tags.get("com.apple.quicktime.model")
-                
                 location_str = tags.get("location") or tags.get("location-eng")
                 if location_str:
                     match = re.search(r'([+-]\d+\.\d+)([+-]\d+\.\d+)', location_str)
@@ -147,7 +142,6 @@ def get_rich_metadata(file_path, file_type, ext):
             pass 
         return meta
 
-    # --- IMAGE PROCESSING ---
     try:
         with Image.open(file_path) as img:
             meta["width"] = img.width
@@ -261,7 +255,6 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         except subprocess.CalledProcessError:
             os.rename(source_path, target_path)
             return target_path
-            
     else:
         os.rename(source_path, target_path)
         return target_path
@@ -294,19 +287,19 @@ def generate_thumbnail(file_path, file_type):
     except Exception:
         return None
 
-# --- NEW: 1200px Intermediate Analysis Canvas ---
-def extract_faces(media_id, final_target_path, file_type, thumb_path, cursor):
+def extract_faces_worker(final_target_path, file_type, thumb_path):
+    """Worker function for heavy Dlib mathematical extraction."""
+    extracted_faces = []
     if not thumb_path or not thumb_path.exists():
-        return
+        return extracted_faces
         
     try:
-        # We fetch the UI's thumbnail dimensions first to ensure we can mathematically 
-        # project our high-res bounding boxes down to the UI's scale
         with Image.open(thumb_path) as t_img:
             thumb_w, thumb_h = t_img.size
 
         img_array = None
         ml_w, ml_h = 0, 0
+        temp_frame = None
 
         if file_type == "image":
             with Image.open(final_target_path) as img:
@@ -314,18 +307,15 @@ def extract_faces(media_id, final_target_path, file_type, thumb_path, cursor):
                 if img.mode != 'RGB': img = img.convert('RGB')
                 
                 orig_w, orig_h = img.size
-                
-                # Cap the maximum dimension at 1200px to protect the CPU
                 scale = min(1200 / orig_w, 1200 / orig_h)
-                if scale > 1: scale = 1 # Don't upscale tiny images
+                if scale > 1: scale = 1 
                 
                 ml_img = img.resize((int(orig_w * scale), int(orig_h * scale)), Image.Resampling.LANCZOS)
                 ml_w, ml_h = ml_img.size
                 img_array = np.array(ml_img)
                 
         elif file_type == "video":
-            # Extract a 1200px high-res temp frame using FFmpeg
-            temp_frame = BASE_DIR / f"temp_ml_frame_{media_id}.jpg"
+            temp_frame = BASE_DIR / f"temp_ml_frame_{os.urandom(4).hex()}.jpg"
             subprocess.run([
                 "ffmpeg", "-y", "-i", str(final_target_path),
                 "-ss", "00:00:00.100", "-vframes", "1",
@@ -342,28 +332,30 @@ def extract_faces(media_id, final_target_path, file_type, thumb_path, cursor):
             face_locations = face_recognition.face_locations(img_array)
             face_encodings = face_recognition.face_encodings(img_array, known_face_locations=face_locations)
             
-            # The magical coordinate translation step
-            # Scales the 1200px boxes down to perfectly fit over the 400px UI thumbnails
-            ratio = thumb_w / ml_w
-            
-            for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
-                t_top = int(top * ratio)
-                t_right = int(right * ratio)
-                t_bottom = int(bottom * ratio)
-                t_left = int(left * ratio)
-                
-                cursor.execute("""
-                    INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left, exclude_from_ml) 
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
-                """, (media_id, encoding.tobytes(), t_top, t_right, t_bottom, t_left))
-                
+            if ml_w > 0:
+                ratio = thumb_w / ml_w
+                for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
+                    extracted_faces.append({
+                        "encoding": encoding.tobytes(),
+                        "box_top": int(top * ratio),
+                        "box_right": int(right * ratio),
+                        "box_bottom": int(bottom * ratio),
+                        "box_left": int(left * ratio)
+                    })
+                    
     except Exception as e:
-        print(f"Face extraction failed for ID {media_id}: {e}")
+        print(f"Face extraction failed: {e}")
+        
+    return extracted_faces
 
-def process_staging():
-    print("--- Starting Media Pipeline ---")
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+# --- THE PARALLEL WORKER ---
+def process_single_file_worker(args):
+    """
+    Executes in a completely separate process.
+    Handles heavy CPU lifting without locking the SQLite database.
+    """
+    file_path, source_name = args
+    ext = file_path.suffix.lower()
     
     image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
     raw_exts = {'.dng', '.cr2', '.nef', '.arw'}
@@ -371,95 +363,174 @@ def process_staging():
     doc_exts = {'.pdf', '.docx', '.txt', '.xlsx', '.csv'}
     audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
     
-    files_processed = 0
+    if ext in image_exts: file_type = "image"
+    elif ext in raw_exts: file_type = "image"
+    elif ext in video_exts: file_type = "video"
+    elif ext in audio_exts: file_type = "audio"
+    else: file_type = "document"
+    
+    m = get_rich_metadata(file_path, file_type, ext)
+    
+    if file_type == "video":
+        for img_ext in ['.heic', '.jpg', '.jpeg']:
+            potential_match = file_path.with_suffix(img_ext)
+            if potential_match.exists():
+                m_photo = get_rich_metadata(potential_match, "image", img_ext)
+                if m_photo.get("date_taken"): m["date_taken"] = m_photo["date_taken"]
+                if m_photo.get("lat"): 
+                    m["lat"] = m_photo["lat"]
+                    m["lon"] = m_photo["lon"]
+                if m_photo.get("camera_model"): m["camera_model"] = m_photo["camera_model"]
+                break
+    
+    parsed_date = get_fallback_date(file_path, m["date_taken"])
+    
+    target_dir = ORGANIZED_DIR / parsed_date.strftime("%Y") / parsed_date.strftime("%m")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Heavy: Transcoding / RAW Conversion
+    final_target_path = compress_and_move(file_path, target_dir, file_path.name, file_type, ext)
+    
+    # Heavy: FFmpeg / Pillow Resizing
+    thumbnail_path = None
+    if file_type in ["image", "video"]:
+        thumbnail_path = generate_thumbnail(final_target_path, file_type)
+        
+    new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
+    
+    location_str = None
+    if m["lat"] is not None and m["lon"] is not None:
+        try:
+            geo_result = rg.search((m["lat"], m["lon"]))
+            if geo_result:
+                city = geo_result[0].get('name', '')
+                state = geo_result[0].get('admin1', '')
+                location_str = f"{city}, {state}".strip(", ")
+        except Exception:
+            pass
+            
+    # Heavy: Dlib 128-d Math
+    faces_data = []
+    if thumbnail_path:
+        faces_data = extract_faces_worker(final_target_path, file_type, thumbnail_path)
+
+    # Return a clean dictionary to the Main Process so it can handle the SQLite locking
+    return {
+        "original_name": file_path.name,
+        "current_path": str(final_target_path),
+        "file_type": file_type,
+        "source": source_name,
+        "date_taken": parsed_date.strftime("%Y-%m-%d %H:%M:%S"),
+        "file_size_kb": new_size_kb,
+        "width": m["width"],
+        "height": m["height"],
+        "camera_model": m["camera_model"],
+        "f_stop": m["f_stop"],
+        "exposure_time": m["exposure_time"],
+        "iso": m["iso"],
+        "flash_fired": m["flash_fired"],
+        "latitude": m["lat"],
+        "longitude": m["lon"],
+        "location_name": location_str,
+        "faces": faces_data
+    }
+
+def process_staging():
+    print("--- Starting Parallel Media Pipeline ---")
+    
+    # 1. Main Thread Data Prep
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Pre-fetch existing filenames to prevent duplicate processing
+    cursor.execute("SELECT original_name FROM media")
+    existing_names = {row[0] for row in cursor.fetchall()}
+    
+    image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
+    raw_exts = {'.dng', '.cr2', '.nef', '.arw'}
+    video_exts = {'.mp4', '.mkv', '.mov', '.avi'}
+    doc_exts = {'.pdf', '.docx', '.txt', '.xlsx', '.csv'}
+    audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
+    valid_exts = image_exts | raw_exts | video_exts | doc_exts | audio_exts
+    
+    tasks_to_run = []
     duplicates_skipped = 0
 
     for source_name, folder_path in STAGING_DIRS.items():
         for file_path in folder_path.rglob("*"):
-            if file_path.is_dir(): continue
-
-            # Pre-filter check
-            cursor.execute("SELECT 1 FROM media WHERE original_name = ?", (file_path.name,))
-            if cursor.fetchone():
+            if file_path.is_dir() or file_path.suffix.lower() not in valid_exts:
+                continue
+            
+            if file_path.name in existing_names:
                 duplicates_skipped += 1
-                continue 
-                
-            ext = file_path.suffix.lower()
-            valid_exts = image_exts | raw_exts | video_exts | doc_exts | audio_exts
-            if ext not in valid_exts: 
                 continue
                 
-            if ext in image_exts: file_type = "image"
-            elif ext in raw_exts: file_type = "image"
-            elif ext in video_exts: file_type = "video"
-            elif ext in audio_exts: file_type = "audio"
-            else: file_type = "document"
-            
-            m = get_rich_metadata(file_path, file_type, ext)
-            
-            if file_type == "video":
-                for img_ext in ['.heic', '.jpg', '.jpeg']:
-                    potential_match = file_path.with_suffix(img_ext)
-                    if potential_match.exists():
-                        m_photo = get_rich_metadata(potential_match, "image", img_ext)
-                        if m_photo.get("date_taken"): m["date_taken"] = m_photo["date_taken"]
-                        if m_photo.get("lat"): 
-                            m["lat"] = m_photo["lat"]
-                            m["lon"] = m_photo["lon"]
-                        if m_photo.get("camera_model"): m["camera_model"] = m_photo["camera_model"]
-                        break
-            
-            parsed_date = get_fallback_date(file_path, m["date_taken"])
-            
-            target_dir = ORGANIZED_DIR / parsed_date.strftime("%Y") / parsed_date.strftime("%m")
-            target_dir.mkdir(parents=True, exist_ok=True)
-            
-            final_target_path = compress_and_move(file_path, target_dir, file_path.name, file_type, ext)
-            
-            thumbnail_path = None
-            if file_type in ["image", "video"]:
-                thumbnail_path = generate_thumbnail(final_target_path, file_type)
+            tasks_to_run.append((file_path, source_name))
+
+    total_tasks = len(tasks_to_run)
+    print(f"Found {total_tasks} new files to process. (Skipped {duplicates_skipped} duplicates).")
+    
+    if total_tasks == 0:
+        conn.close()
+        return
+
+    files_processed = 0
+
+    # 2. Parallel Processing (The "Scatter")
+    # By default, ProcessPoolExecutor will spin up workers equal to os.cpu_count()
+    # Your i5 processor will run ~12 simultaneous pipelines
+    print("Spinning up worker processes... (CPU usage will spike)")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # submit() allows us to process files out of order as they finish
+        future_to_file = {executor.submit(process_single_file_worker, task): task for task in tasks_to_run}
+        
+        # 3. Synchronous Database Inserts (The "Gather")
+        for future in concurrent.futures.as_completed(future_to_file):
+            try:
+                result = future.result()
                 
-            new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
-            
-            location_str = None
-            if m["lat"] is not None and m["lon"] is not None:
-                try:
-                    geo_result = rg.search((m["lat"], m["lon"]))
-                    if geo_result:
-                        city = geo_result[0].get('name', '')
-                        state = geo_result[0].get('admin1', '')
-                        location_str = f"{city}, {state}".strip(", ")
-                except Exception:
-                    pass
-            
-            # FIXED: Safe pure INSERT protects Foreign Key mappings
-            cursor.execute("""
-                INSERT INTO media 
-                (original_name, current_path, file_type, source, date_taken, 
-                file_size_kb, width, height, camera_model, f_stop, exposure_time, 
-                iso, flash_fired, latitude, longitude, location_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                file_path.name, str(final_target_path), file_type, source_name, 
-                parsed_date.strftime("%Y-%m-%d %H:%M:%S"), new_size_kb, 
-                m["width"], m["height"], m["camera_model"], m["f_stop"], 
-                m["exposure_time"], m["iso"], m["flash_fired"], m["lat"], m["lon"], location_str
-            ))
-            
-            media_id = cursor.lastrowid
-            
-            if thumbnail_path:
-                extract_faces(media_id, final_target_path, file_type, thumbnail_path, cursor)
+                # Insert standard metadata
+                cursor.execute("""
+                    INSERT INTO media 
+                    (original_name, current_path, file_type, source, date_taken, 
+                    file_size_kb, width, height, camera_model, f_stop, exposure_time, 
+                    iso, flash_fired, latitude, longitude, location_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    result["original_name"], result["current_path"], result["file_type"], 
+                    result["source"], result["date_taken"], result["file_size_kb"], 
+                    result["width"], result["height"], result["camera_model"], result["f_stop"], 
+                    result["exposure_time"], result["iso"], result["flash_fired"], 
+                    result["latitude"], result["longitude"], result["location_name"]
+                ))
                 
-            files_processed += 1
+                media_id = cursor.lastrowid
+                
+                # Insert facial vectors seamlessly linked via foreign key
+                for face in result["faces"]:
+                    cursor.execute("""
+                        INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left, exclude_from_ml) 
+                        VALUES (?, ?, ?, ?, ?, ?, 0)
+                    """, (
+                        media_id, face["encoding"], face["box_top"], face["box_right"], 
+                        face["box_bottom"], face["box_left"]
+                    ))
+                
+                files_processed += 1
+                
+                # Batch commit every 10 files to keep the DB flushed
+                if files_processed % 10 == 0:
+                    conn.commit()
+                    print(f"[{files_processed}/{total_tasks}] Indexed batch...")
+                    
+            except Exception as exc:
+                print(f"File generated an exception: {exc}")
 
     conn.commit()
     conn.close()
     
-    print(f"Organized and indexed {files_processed} files.")
-    if duplicates_skipped > 0:
-        print(f"Skipped {duplicates_skipped} exact name duplicates (left safely in staging).")
+    print(f"Parallel pipeline finished. Successfully indexed {files_processed} files.")
+
 
 def cluster_faces():
     """Runs DBSCAN to cluster all facial vectors in the database."""
@@ -467,7 +538,6 @@ def cluster_faces():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Filters out manual tags automatically
     cursor.execute("SELECT id, encoding FROM faces WHERE exclude_from_ml = 0 AND encoding IS NOT NULL")
     rows = cursor.fetchall()
 
@@ -502,7 +572,6 @@ def cluster_faces():
     unique_clusters = len(set(cluster_ids)) - (1 if -1 in cluster_ids else 0)
     print(f"Success! Grouped faces into {unique_clusters} distinct people.")
 
-    print("Saving cluster assignments to the database...")
     updates = [(int(cid), fid) for fid, cid in zip(face_ids, cluster_ids)]
     cursor.executemany("UPDATE faces SET cluster_id = ? WHERE id = ?", updates)
     
