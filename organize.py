@@ -288,22 +288,30 @@ def generate_thumbnail(file_path, file_type):
     except Exception:
         return None
 
+
 def extract_faces(media_id, thumbnail_path, cursor):
     if not thumbnail_path or not thumbnail_path.exists():
         return
         
     try:
         image = face_recognition.load_image_file(str(thumbnail_path))
-        face_encodings = face_recognition.face_encodings(image)
         
-        for encoding in face_encodings:
+        # 1. Find the physical locations (bounding boxes) of the faces
+        face_locations = face_recognition.face_locations(image)
+        # 2. Extract the math vectors based on those exact locations
+        face_encodings = face_recognition.face_encodings(image, known_face_locations=face_locations)
+        
+        # 3. Save both the vector and the box to the database
+        for (top, right, bottom, left), encoding in zip(face_locations, face_encodings):
             encoding_blob = encoding.tobytes()
             cursor.execute("""
-                INSERT INTO faces (media_id, encoding) 
-                VALUES (?, ?)
-            """, (media_id, encoding_blob))
+                INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (media_id, encoding_blob, top, right, bottom, left))
+            
     except Exception as e:
         print(f"Face extraction failed for ID {media_id}: {e}")
+
 
 def process_staging():
     print("--- Starting Media Pipeline ---")
