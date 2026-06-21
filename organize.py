@@ -16,6 +16,8 @@ import face_recognition
 import numpy as np
 from sklearn.cluster import DBSCAN
 import concurrent.futures
+import tempfile
+import math
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -36,6 +38,9 @@ THUMB_DIR.mkdir(parents=True, exist_ok=True)
 for path in STAGING_DIRS.values():
     path.mkdir(parents=True, exist_ok=True)
 ORGANIZED_DIR.mkdir(parents=True, exist_ok=True)
+
+# Worker-level Geocode Cache (Instantiated per parallel process)
+GEO_CACHE = {}
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -91,6 +96,25 @@ def init_db():
     conn.commit()
     conn.close()
 
+def get_location_name(lat, lon):
+    if lat is None or lon is None: return None
+    # Round to 3 decimal places (~110 meters) to increase cache hits
+    key = (round(lat, 3), round(lon, 3))
+    if key in GEO_CACHE:
+        return GEO_CACHE[key]
+    
+    try:
+        geo_result = rg.search((lat, lon))
+        if geo_result:
+            city = geo_result[0].get('name', '')
+            state = geo_result[0].get('admin1', '')
+            loc_str = f"{city}, {state}".strip(", ")
+            GEO_CACHE[key] = loc_str
+            return loc_str
+    except Exception:
+        pass
+    return None
+
 def get_rich_metadata(file_path, file_type, ext):
     meta = {
         "date_taken": None, "camera_model": None, 
@@ -99,19 +123,15 @@ def get_rich_metadata(file_path, file_type, ext):
         "lat": None, "lon": None
     }
     
-    if file_type in ["document", "audio"]:
-        return meta
+    if file_type in ["document", "audio"]: return meta
 
     if ext in ['.dng', '.cr2', '.nef', '.arw']:
         try:
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
-                if "EXIF DateTimeOriginal" in tags:
-                    meta["date_taken"] = str(tags["EXIF DateTimeOriginal"])
-                if "Image Model" in tags:
-                    meta["camera_model"] = str(tags["Image Model"]).strip()
-        except Exception:
-            pass
+                if "EXIF DateTimeOriginal" in tags: meta["date_taken"] = str(tags["EXIF DateTimeOriginal"])
+                if "Image Model" in tags: meta["camera_model"] = str(tags["Image Model"]).strip()
+        except Exception: pass
         return meta
 
     if file_type == "video":
@@ -123,9 +143,9 @@ def get_rich_metadata(file_path, file_type, ext):
             if "format" in data and "tags" in data["format"]:
                 tags = {k.lower(): v for k, v in data["format"]["tags"].items()}
                 raw_date = tags.get("creation_time")
-                if raw_date:
-                    meta["date_taken"] = raw_date.replace("T", " ")[:19]
+                if raw_date: meta["date_taken"] = raw_date.replace("T", " ")[:19]
                 meta["camera_model"] = tags.get("model") or tags.get("com.android.model") or tags.get("com.apple.quicktime.model")
+                
                 location_str = tags.get("location") or tags.get("location-eng")
                 if location_str:
                     match = re.search(r'([+-]\d+\.\d+)([+-]\d+\.\d+)', location_str)
@@ -138,8 +158,7 @@ def get_rich_metadata(file_path, file_type, ext):
                     meta["width"] = stream.get("width")
                     meta["height"] = stream.get("height")
                     break
-        except Exception:
-            pass 
+        except Exception: pass 
         return meta
 
     try:
@@ -148,8 +167,7 @@ def get_rich_metadata(file_path, file_type, ext):
             meta["height"] = img.height
             
             exif = img._getexif()
-            if not exif:
-                return meta
+            if not exif: return meta
             
             exif_data = {TAGS.get(k, k): v for k, v in exif.items()}
             
@@ -157,15 +175,10 @@ def get_rich_metadata(file_path, file_type, ext):
             meta["iso"] = exif_data.get("ISOSpeedRatings")
             meta["flash_fired"] = 1 if exif_data.get("Flash") in [1, 9, 25, 73, 89] else 0
             
-            if "FNumber" in exif_data:
-                meta["f_stop"] = float(exif_data["FNumber"])
-            if "ExposureTime" in exif_data:
-                meta["exposure_time"] = str(exif_data["ExposureTime"])
-                
-            if "DateTimeOriginal" in exif_data:
-                meta["date_taken"] = exif_data["DateTimeOriginal"]
-            elif "DateTime" in exif_data:
-                meta["date_taken"] = exif_data["DateTime"]
+            if "FNumber" in exif_data: meta["f_stop"] = float(exif_data["FNumber"])
+            if "ExposureTime" in exif_data: meta["exposure_time"] = str(exif_data["ExposureTime"])
+            if "DateTimeOriginal" in exif_data: meta["date_taken"] = exif_data["DateTimeOriginal"]
+            elif "DateTime" in exif_data: meta["date_taken"] = exif_data["DateTime"]
 
             if "GPSInfo" in exif_data:
                 gps_info = {GPSTAGS.get(k, k): v for k, v in exif_data["GPSInfo"].items()}
@@ -175,18 +188,14 @@ def get_rich_metadata(file_path, file_type, ext):
                     meta["lat"] = get_deg(gps_info["GPSLatitude"]) * (1 if gps_info["GPSLatitudeRef"] == "N" else -1)
                 if "GPSLongitude" in gps_info and "GPSLongitudeRef" in gps_info:
                     meta["lon"] = get_deg(gps_info["GPSLongitude"]) * (1 if gps_info["GPSLongitudeRef"] == "E" else -1)
-    except Exception:
-        pass 
-    
+    except Exception: pass 
     return meta
 
 def get_fallback_date(file_path, exif_date_str):
     if exif_date_str:
         for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(exif_date_str, fmt)
-            except ValueError:
-                continue
+            try: return datetime.strptime(exif_date_str, fmt)
+            except ValueError: continue
     return datetime.fromtimestamp(file_path.stat().st_mtime)
 
 def compress_and_move(source_path, target_dir, original_name, file_type, ext):
@@ -224,14 +233,11 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
                     background = Image.new('RGB', img.size, (255, 255, 255))
                     background.paste(img, mask=img.convert('RGBA').split()[3])
                     rgb_im = background
-                else:
-                    rgb_im = img.convert('RGB')
+                else: rgb_im = img.convert('RGB')
                 
                 exif = img.info.get('exif')
-                if exif:
-                    rgb_im.save(new_target, "JPEG", quality=75, optimize=True, exif=exif)
-                else:
-                    rgb_im.save(new_target, "JPEG", quality=75, optimize=True)
+                if exif: rgb_im.save(new_target, "JPEG", quality=75, optimize=True, exif=exif)
+                else: rgb_im.save(new_target, "JPEG", quality=75, optimize=True)
             
             os.remove(source_path) 
             return new_target
@@ -241,11 +247,13 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
 
     elif file_type == "video":
         new_target = target_path.with_suffix('.mp4')
+        # FIXED: Restricted FFmpeg to a single thread to prevent CPU thrashing
         cmd = [
             "ffmpeg", "-y", "-i", str(source_path), 
             "-map_metadata", "0", 
             "-c:v", "libx265", "-crf", "28", "-preset", "medium", 
             "-c:a", "aac", "-b:a", "128k", "-async", "1",
+            "-threads", "1",
             "-v", "quiet", str(new_target)
         ]
         try:
@@ -262,36 +270,31 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
 def generate_thumbnail(file_path, file_type):
     path_hash = hashlib.md5(str(file_path).encode('utf-8')).hexdigest()
     cache_path = THUMB_DIR / f"{path_hash}.jpg"
-    
-    if cache_path.exists():
-        return cache_path
+    if cache_path.exists(): return cache_path
 
     try:
         if file_type == "image":
             with Image.open(file_path) as img:
                 img = ImageOps.exif_transpose(img)
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
+                if img.mode != 'RGB': img = img.convert('RGB')
                 img.thumbnail((400, 400))
                 img.save(cache_path, "JPEG", quality=75)
             return cache_path
         
         elif file_type == "video":
+            # FIXED: Single-threaded FFmpeg thumbnail generation
             cmd = [
                 "ffmpeg", "-y", "-i", str(file_path), 
                 "-ss", "00:00:00.100", "-vframes", "1", 
-                "-vf", "scale=400:-1", str(cache_path)
+                "-vf", "scale=400:-1", "-threads", "1", str(cache_path)
             ]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             return cache_path
-    except Exception:
-        return None
+    except Exception: return None
 
 def extract_faces_worker(final_target_path, file_type, thumb_path):
-    """Worker function for heavy Dlib mathematical extraction."""
     extracted_faces = []
-    if not thumb_path or not thumb_path.exists():
-        return extracted_faces
+    if not thumb_path or not thumb_path.exists(): return extracted_faces
         
     try:
         with Image.open(thumb_path) as t_img:
@@ -299,7 +302,7 @@ def extract_faces_worker(final_target_path, file_type, thumb_path):
 
         img_array = None
         ml_w, ml_h = 0, 0
-        temp_frame = None
+        temp_path = None
 
         if file_type == "image":
             with Image.open(final_target_path) as img:
@@ -315,18 +318,24 @@ def extract_faces_worker(final_target_path, file_type, thumb_path):
                 img_array = np.array(ml_img)
                 
         elif file_type == "video":
-            temp_frame = BASE_DIR / f"temp_ml_frame_{os.urandom(4).hex()}.jpg"
-            subprocess.run([
-                "ffmpeg", "-y", "-i", str(final_target_path),
-                "-ss", "00:00:00.100", "-vframes", "1",
-                "-vf", "scale='min(1200,iw)':-1", str(temp_frame)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            
-            if temp_frame.exists():
-                with Image.open(temp_frame) as img:
-                    ml_w, ml_h = img.size
-                    img_array = np.array(img)
-                os.remove(temp_frame)
+            # FIXED: Use true OS temporary files, guaranteed to clean up
+            with tempfile.NamedTemporaryFile(suffix=".jpg", dir=BASE_DIR, delete=False) as tf:
+                temp_path = tf.name
+                
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", str(final_target_path),
+                    "-ss", "00:00:00.100", "-vframes", "1",
+                    "-vf", "scale='min(1200,iw)':-1", "-threads", "1", temp_path
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                
+                if Path(temp_path).exists():
+                    with Image.open(temp_path) as img:
+                        ml_w, ml_h = img.size
+                        img_array = np.array(img)
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
 
         if img_array is not None:
             face_locations = face_recognition.face_locations(img_array)
@@ -348,12 +357,8 @@ def extract_faces_worker(final_target_path, file_type, thumb_path):
         
     return extracted_faces
 
-# --- THE PARALLEL WORKER ---
 def process_single_file_worker(args):
-    """
-    Executes in a completely separate process.
-    Handles heavy CPU lifting without locking the SQLite database.
-    """
+    """Executes in an isolated worker process."""
     file_path, source_name = args
     ext = file_path.suffix.lower()
     
@@ -388,33 +393,21 @@ def process_single_file_worker(args):
     target_dir = ORGANIZED_DIR / parsed_date.strftime("%Y") / parsed_date.strftime("%m")
     target_dir.mkdir(parents=True, exist_ok=True)
     
-    # Heavy: Transcoding / RAW Conversion
     final_target_path = compress_and_move(file_path, target_dir, file_path.name, file_type, ext)
     
-    # Heavy: FFmpeg / Pillow Resizing
     thumbnail_path = None
     if file_type in ["image", "video"]:
         thumbnail_path = generate_thumbnail(final_target_path, file_type)
         
     new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
     
-    location_str = None
-    if m["lat"] is not None and m["lon"] is not None:
-        try:
-            geo_result = rg.search((m["lat"], m["lon"]))
-            if geo_result:
-                city = geo_result[0].get('name', '')
-                state = geo_result[0].get('admin1', '')
-                location_str = f"{city}, {state}".strip(", ")
-        except Exception:
-            pass
+    # Leverages the fast per-worker reverse geocoding cache
+    location_str = get_location_name(m["lat"], m["lon"])
             
-    # Heavy: Dlib 128-d Math
     faces_data = []
     if thumbnail_path:
         faces_data = extract_faces_worker(final_target_path, file_type, thumbnail_path)
 
-    # Return a clean dictionary to the Main Process so it can handle the SQLite locking
     return {
         "original_name": file_path.name,
         "current_path": str(final_target_path),
@@ -437,12 +430,9 @@ def process_single_file_worker(args):
 
 def process_staging():
     print("--- Starting Parallel Media Pipeline ---")
-    
-    # 1. Main Thread Data Prep
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Pre-fetch existing filenames to prevent duplicate processing
     cursor.execute("SELECT original_name FROM media")
     existing_names = {row[0] for row in cursor.fetchall()}
     
@@ -453,7 +443,9 @@ def process_staging():
     audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
     valid_exts = image_exts | raw_exts | video_exts | doc_exts | audio_exts
     
-    tasks_to_run = []
+    # FIXED: The Race Condition Blocker
+    queued_names = set()
+    all_tasks = []
     duplicates_skipped = 0
 
     for source_name, folder_path in STAGING_DIRS.items():
@@ -461,13 +453,15 @@ def process_staging():
             if file_path.is_dir() or file_path.suffix.lower() not in valid_exts:
                 continue
             
-            if file_path.name in existing_names:
+            # Rejects if it's in the DB, OR if another file with this name is already in the queue
+            if file_path.name in existing_names or file_path.name in queued_names:
                 duplicates_skipped += 1
                 continue
                 
-            tasks_to_run.append((file_path, source_name))
+            queued_names.add(file_path.name)
+            all_tasks.append((file_path, source_name))
 
-    total_tasks = len(tasks_to_run)
+    total_tasks = len(all_tasks)
     print(f"Found {total_tasks} new files to process. (Skipped {duplicates_skipped} duplicates).")
     
     if total_tasks == 0:
@@ -476,64 +470,64 @@ def process_staging():
 
     files_processed = 0
 
-    # 2. Parallel Processing (The "Scatter")
-    # By default, ProcessPoolExecutor will spin up workers equal to os.cpu_count()
-    # Your i5 processor will run ~12 simultaneous pipelines
-    print("Spinning up worker processes... (CPU usage will spike)")
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        # submit() allows us to process files out of order as they finish
-        future_to_file = {executor.submit(process_single_file_worker, task): task for task in tasks_to_run}
-        
-        # 3. Synchronous Database Inserts (The "Gather")
-        for future in concurrent.futures.as_completed(future_to_file):
-            try:
-                result = future.result()
-                
-                # Insert standard metadata
-                cursor.execute("""
-                    INSERT INTO media 
-                    (original_name, current_path, file_type, source, date_taken, 
-                    file_size_kb, width, height, camera_model, f_stop, exposure_time, 
-                    iso, flash_fired, latitude, longitude, location_name)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    result["original_name"], result["current_path"], result["file_type"], 
-                    result["source"], result["date_taken"], result["file_size_kb"], 
-                    result["width"], result["height"], result["camera_model"], result["f_stop"], 
-                    result["exposure_time"], result["iso"], result["flash_fired"], 
-                    result["latitude"], result["longitude"], result["location_name"]
-                ))
-                
-                media_id = cursor.lastrowid
-                
-                # Insert facial vectors seamlessly linked via foreign key
-                for face in result["faces"]:
-                    cursor.execute("""
-                        INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left, exclude_from_ml) 
-                        VALUES (?, ?, ?, ?, ?, ?, 0)
-                    """, (
-                        media_id, face["encoding"], face["box_top"], face["box_right"], 
-                        face["box_bottom"], face["box_left"]
-                    ))
-                
-                files_processed += 1
-                
-                # Batch commit every 10 files to keep the DB flushed
-                if files_processed % 10 == 0:
-                    conn.commit()
-                    print(f"[{files_processed}/{total_tasks}] Indexed batch...")
-                    
-            except Exception as exc:
-                print(f"File generated an exception: {exc}")
+    # FIXED: Prevent RAM explosion by grouping tasks into chunks
+    CHUNK_SIZE = 500
+    task_chunks = [all_tasks[i:i + CHUNK_SIZE] for i in range(0, total_tasks, CHUNK_SIZE)]
 
-    conn.commit()
-    conn.close()
+    # FIXED: Max workers capped to 4 to prevent FFmpeg from halting the CPU
+    max_w = min(4, os.cpu_count() or 1)
+    print(f"Spinning up {max_w} worker processes... (CPU usage will spike safely)")
     
+    for chunk_idx, chunk in enumerate(task_chunks, 1):
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_w) as executor:
+            future_to_file = {executor.submit(process_single_file_worker, task): task for task in chunk}
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                try:
+                    result = future.result()
+                    
+                    cursor.execute("""
+                        INSERT INTO media 
+                        (original_name, current_path, file_type, source, date_taken, 
+                        file_size_kb, width, height, camera_model, f_stop, exposure_time, 
+                        iso, flash_fired, latitude, longitude, location_name)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        result["original_name"], result["current_path"], result["file_type"], 
+                        result["source"], result["date_taken"], result["file_size_kb"], 
+                        result["width"], result["height"], result["camera_model"], result["f_stop"], 
+                        result["exposure_time"], result["iso"], result["flash_fired"], 
+                        result["latitude"], result["longitude"], result["location_name"]
+                    ))
+                    
+                    media_id = cursor.lastrowid
+                    
+                    for face in result["faces"]:
+                        cursor.execute("""
+                            INSERT INTO faces (media_id, encoding, box_top, box_right, box_bottom, box_left, exclude_from_ml) 
+                            VALUES (?, ?, ?, ?, ?, ?, 0)
+                        """, (
+                            media_id, face["encoding"], face["box_top"], face["box_right"], 
+                            face["box_bottom"], face["box_left"]
+                        ))
+                    
+                    files_processed += 1
+                    
+                    if files_processed % 10 == 0:
+                        conn.commit()
+                        print(f"[{files_processed}/{total_tasks}] Indexed batch...")
+                        
+                except Exception as exc:
+                    print(f"File generated an exception: {exc}")
+
+        # Flush DB writes completely between chunks to limit memory footprint
+        conn.commit()
+        
+    conn.close()
     print(f"Parallel pipeline finished. Successfully indexed {files_processed} files.")
 
 
 def cluster_faces():
-    """Runs DBSCAN to cluster all facial vectors in the database."""
     print("\n--- Running Facial Clustering ---")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

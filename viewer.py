@@ -239,6 +239,7 @@ HTML_TEMPLATE = """
     {% endif %}
 
     <div id="lightboxModal" class="modal" onclick="closeLightbox(event)">
+        <span class="counter" id="modalCounter"></span>
         <span class="modal-close" onclick="closeLightbox(event)">&times;</span>
         <div class="nav-btn prev-btn" style="left:10px;" onclick="navigate(-1, event)">&#10094;</div>
         
@@ -490,7 +491,6 @@ HTML_TEMPLATE = """
 
             const urlParams = new URLSearchParams(galleryData[currentIndex].src.split('?')[1]);
             try {
-                // FIXED PARSING: The backend returns {"faces": [...], "thumb_w": X, "thumb_h": Y}
                 const res = await fetch(`/api/get_faces?path=${encodeURIComponent(urlParams.get('path'))}`);
                 const data = await res.json();
                 
@@ -500,7 +500,6 @@ HTML_TEMPLATE = """
                 data.faces.forEach(face => {
                     if(face.box_top === null || face.box_top === undefined) return;
                     
-                    // Fixed translation math uses the backend's explicit thumbnail dimensions
                     const topPct = (face.box_top / thumbH) * 100; 
                     const leftPct = (face.box_left / thumbW) * 100;
                     const widthPct = ((face.box_right - face.box_left) / thumbW) * 100; 
@@ -721,7 +720,8 @@ PEOPLE_HTML_TEMPLATE = """
             <h3>Cluster #{{ c.cluster_id }}</h3><p>{{ c.face_count }} Photos</p>
             <div class="name-input-group">
                 <input type="text" id="input-{{ c.cluster_id }}" placeholder="Type name..." onkeypress="handleEnter(event, {{ c.cluster_id }})">
-                <button onclick="submitName({{ c.cluster_id }})">Save</button>
+                <button onclick="submitName({{ c.cluster_id }})" title="Save Name">Save</button>
+                <button onclick="deleteCluster({{ c.cluster_id }})" style="background:#dc3545; padding: 8px 10px;" title="Delete this junk cluster entirely">🗑️</button>
             </div>
         </div>
         {% endfor %}
@@ -744,10 +744,21 @@ PEOPLE_HTML_TEMPLATE = """
             document.getElementById('named-tab').style.display = tabName === 'named' ? 'grid' : 'none';
         }
         function handleEnter(event, clusterId) { if (event.key === 'Enter') submitName(clusterId); }
+        
         async function submitName(clusterId) {
             const inputEl = document.getElementById(`input-${clusterId}`);
             if (!inputEl.value.trim()) return;
             const res = await fetch('/api/name_cluster', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cluster_id: clusterId, person_name: inputEl.value.trim() }) });
+            if (res.ok) document.getElementById(`cluster-${clusterId}`).style.display = 'none';
+        }
+        
+        async function deleteCluster(clusterId) {
+            if (!confirm("Delete all faces in this cluster? Use this to remove random crowds or non-faces like trees.")) return;
+            const res = await fetch('/api/delete_cluster', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cluster_id: clusterId })
+            });
             if (res.ok) document.getElementById(`cluster-${clusterId}`).style.display = 'none';
         }
     </script>
@@ -801,6 +812,17 @@ def delete_face():
     conn.close()
     return jsonify({"success": True})
 
+@app.route("/api/delete_cluster", methods=["POST"])
+def delete_cluster():
+    cluster_id = request.json.get("cluster_id")
+    if cluster_id is None: return jsonify({"error": "Missing ID"}), 400
+    conn = get_db_connection()
+    # Only delete unnamed clusters to prevent accidental deletion of legitimate tagged data
+    conn.execute("DELETE FROM faces WHERE cluster_id = ? AND person_name IS NULL", (cluster_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
 @app.route("/api/get_faces")
 def get_faces():
     file_path = request.args.get("path")
@@ -821,7 +843,6 @@ def get_faces():
     
     if thumb_path.exists():
         try:
-            # We open it with Pillow first to guarantee we send the exact dimensions to JS
             with Image.open(thumb_path) as img:
                 tw, th = img.size
                 
