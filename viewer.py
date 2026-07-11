@@ -326,9 +326,24 @@ HTML_TEMPLATE = """
                 if (selectedPaths.has(path)) { selectedPaths.delete(path); card.classList.remove('selected'); } 
                 else { selectedPaths.add(path); card.classList.add('selected'); }
                 document.getElementById('batchCount').innerText = `${selectedPaths.size} Selected`;
-            } else { openLightbox(index); }
+            } else { 
+                if (galleryData[index].type === 'document') {
+                    // Extract the raw file path from the src URL
+                    const urlParams = new URLSearchParams(galleryData[index].src.split('?')[1]);
+                    const filePath = decodeURIComponent(urlParams.get('path'));
+                    
+                    // Ping the Flask backend to open it locally
+                    fetch('/api/open_system', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: filePath })
+                    }).catch(e => console.error("Failed to trigger local file open", e));
+                    
+                } else {
+                    openLightbox(index); 
+                }
+            }
         }
-
         
         const modal = document.getElementById('lightboxModal');
         const modalImg = document.getElementById('modalImg');
