@@ -6,6 +6,7 @@ import urllib.parse
 import hashlib
 import subprocess
 from PIL import Image, ImageOps
+import sys 
 
 app = Flask(__name__)
 
@@ -779,6 +780,29 @@ def get_db_connection():
     return conn
 
 # --- API ENDPOINTS ---
+
+@app.route("/api/open_system", methods=["POST"])
+def open_system():
+    data = request.json
+    file_path = data.get("path")
+    
+    if not file_path or not os.path.exists(file_path): 
+        return jsonify({"error": "File not found"}), 404
+        
+    try:
+        # Launch the file using the host OS's default desktop application
+        if sys.platform.startswith('linux'):
+            subprocess.run(["xdg-open", file_path], check=True)
+        elif sys.platform == "win32":
+            os.startfile(file_path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", file_path], check=True)
+            
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"Failed to open document: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/suggest_person")
 def api_suggest_person():
     query_str = request.args.get("q", "")
