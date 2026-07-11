@@ -17,7 +17,6 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 import concurrent.futures
 import tempfile
-import math
 
 # Register HEIC opener with Pillow
 register_heif_opener()
@@ -39,7 +38,6 @@ for path in STAGING_DIRS.values():
     path.mkdir(parents=True, exist_ok=True)
 ORGANIZED_DIR.mkdir(parents=True, exist_ok=True)
 
-# Worker-level Geocode Cache (Instantiated per parallel process)
 GEO_CACHE = {}
 
 def init_db():
@@ -98,7 +96,6 @@ def init_db():
 
 def get_location_name(lat, lon):
     if lat is None or lon is None: return None
-    # Round to 3 decimal places (~110 meters) to increase cache hits
     key = (round(lat, 3), round(lon, 3))
     if key in GEO_CACHE:
         return GEO_CACHE[key]
@@ -247,11 +244,12 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
 
     elif file_type == "video":
         new_target = target_path.with_suffix('.mp4')
-        # FIXED: Restricted FFmpeg to a single thread to prevent CPU thrashing
+        # FIXED: Restricted FFmpeg wrapper AND restricted the libx265 internal encoder pool
         cmd = [
             "ffmpeg", "-y", "-i", str(source_path), 
             "-map_metadata", "0", 
             "-c:v", "libx265", "-crf", "28", "-preset", "medium", 
+            "-x265-params", "pools=1",
             "-c:a", "aac", "-b:a", "128k", "-async", "1",
             "-threads", "1",
             "-v", "quiet", str(new_target)
@@ -282,7 +280,6 @@ def generate_thumbnail(file_path, file_type):
             return cache_path
         
         elif file_type == "video":
-            # FIXED: Single-threaded FFmpeg thumbnail generation
             cmd = [
                 "ffmpeg", "-y", "-i", str(file_path), 
                 "-ss", "00:00:00.100", "-vframes", "1", 
@@ -318,7 +315,6 @@ def extract_faces_worker(final_target_path, file_type, thumb_path):
                 img_array = np.array(ml_img)
                 
         elif file_type == "video":
-            # FIXED: Use true OS temporary files, guaranteed to clean up
             with tempfile.NamedTemporaryFile(suffix=".jpg", dir=BASE_DIR, delete=False) as tf:
                 temp_path = tf.name
                 
@@ -358,14 +354,13 @@ def extract_faces_worker(final_target_path, file_type, thumb_path):
     return extracted_faces
 
 def process_single_file_worker(args):
-    """Executes in an isolated worker process."""
     file_path, source_name = args
     ext = file_path.suffix.lower()
     
     image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
     raw_exts = {'.dng', '.cr2', '.nef', '.arw'}
     video_exts = {'.mp4', '.mkv', '.mov', '.avi'}
-    doc_exts = {'.pdf', '.docx', '.txt', '.xlsx', '.csv'}
+    doc_exts = {'.pdf', '.docx', '.doc', '.txt', '.xlsx', '.csv', '.ppt', '.pptx'}
     audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
     
     if ext in image_exts: file_type = "image"
@@ -389,7 +384,6 @@ def process_single_file_worker(args):
                 break
     
     parsed_date = get_fallback_date(file_path, m["date_taken"])
-    
     target_dir = ORGANIZED_DIR / parsed_date.strftime("%Y") / parsed_date.strftime("%m")
     target_dir.mkdir(parents=True, exist_ok=True)
     
@@ -400,8 +394,6 @@ def process_single_file_worker(args):
         thumbnail_path = generate_thumbnail(final_target_path, file_type)
         
     new_size_kb = round(os.path.getsize(final_target_path) / 1024, 2)
-    
-    # Leverages the fast per-worker reverse geocoding cache
     location_str = get_location_name(m["lat"], m["lon"])
             
     faces_data = []
@@ -430,20 +422,21 @@ def process_single_file_worker(args):
 
 def process_staging():
     print("--- Starting Parallel Media Pipeline ---")
+    
+    # Open DB, fetch names, and IMMEDIATELY CLOSE IT to prevent POSIX lock inheritance
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     cursor.execute("SELECT original_name FROM media")
     existing_names = {row[0] for row in cursor.fetchall()}
+    conn.close() 
     
     image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
     raw_exts = {'.dng', '.cr2', '.nef', '.arw'}
     video_exts = {'.mp4', '.mkv', '.mov', '.avi'}
-    doc_exts = {'.pdf', '.docx', '.txt', '.xlsx', '.csv'}
+    doc_exts = {'.pdf', '.docx', '.doc', '.txt', '.xlsx', '.csv', '.ppt', '.pptx'}
     audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
     valid_exts = image_exts | raw_exts | video_exts | doc_exts | audio_exts
     
-    # FIXED: The Race Condition Blocker
     queued_names = set()
     all_tasks = []
     duplicates_skipped = 0
@@ -453,7 +446,6 @@ def process_staging():
             if file_path.is_dir() or file_path.suffix.lower() not in valid_exts:
                 continue
             
-            # Rejects if it's in the DB, OR if another file with this name is already in the queue
             if file_path.name in existing_names or file_path.name in queued_names:
                 duplicates_skipped += 1
                 continue
@@ -465,22 +457,22 @@ def process_staging():
     print(f"Found {total_tasks} new files to process. (Skipped {duplicates_skipped} duplicates).")
     
     if total_tasks == 0:
-        conn.close()
         return
 
     files_processed = 0
-
-    # FIXED: Prevent RAM explosion by grouping tasks into chunks
     CHUNK_SIZE = 500
     task_chunks = [all_tasks[i:i + CHUNK_SIZE] for i in range(0, total_tasks, CHUNK_SIZE)]
 
-    # FIXED: Max workers capped to 4 to prevent FFmpeg from halting the CPU
     max_w = min(4, os.cpu_count() or 1)
     print(f"Spinning up {max_w} worker processes... (CPU usage will spike safely)")
     
     for chunk_idx, chunk in enumerate(task_chunks, 1):
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_w) as executor:
             future_to_file = {executor.submit(process_single_file_worker, task): task for task in chunk}
+            
+            # The workers are done spawning, so it is safe to open the DB exclusively in the main thread
+            conn = sqlite3.connect(DB_PATH, timeout=15.0) 
+            cursor = conn.cursor()
             
             for future in concurrent.futures.as_completed(future_to_file):
                 try:
@@ -520,12 +512,10 @@ def process_staging():
                 except Exception as exc:
                     print(f"File generated an exception: {exc}")
 
-        # Flush DB writes completely between chunks to limit memory footprint
-        conn.commit()
-        
-    conn.close()
-    print(f"Parallel pipeline finished. Successfully indexed {files_processed} files.")
+            conn.commit()
+            conn.close() 
 
+    print(f"Parallel pipeline finished. Successfully indexed {files_processed} files.")
 
 def cluster_faces():
     print("\n--- Running Facial Clustering ---")
