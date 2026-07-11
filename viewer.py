@@ -328,6 +328,7 @@ HTML_TEMPLATE = """
             } else { openLightbox(index); }
         }
 
+        
         const modal = document.getElementById('lightboxModal');
         const modalImg = document.getElementById('modalImg');
         const modalVid = document.getElementById('modalVid');
