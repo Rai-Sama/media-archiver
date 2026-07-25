@@ -184,33 +184,91 @@ def process_batch_extraction():
     conn.close()
 
 def cluster_faces():
-    print("\n--- Running DBSCAN Clustering ---")
+    """Runs a semi-supervised clustering sweep using known anchors to prevent chaining."""
+    print("\n--- Running Smart Facial Clustering ---")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, encoding FROM faces WHERE exclude_from_ml = 0 AND encoding IS NOT NULL")
-    rows = cursor.fetchall()
+    # 1. Gather Known Anchors (Faces you have already manually tagged)
+    cursor.execute("SELECT person_name, encoding FROM faces WHERE person_name IS NOT NULL AND exclude_from_ml = 0 AND encoding IS NOT NULL")
+    known_rows = cursor.fetchall()
 
-    face_ids = []
-    encodings = []
-    for row_id, blob in rows:
-        face_ids.append(row_id)
-        encodings.append(np.frombuffer(blob, dtype=np.float64))
+    anchors = {}
+    for name, blob in known_rows:
+        try:
+            enc = np.frombuffer(blob, dtype=np.float64)
+            if name not in anchors:
+                anchors[name] = []
+            anchors[name].append(enc)
+        except Exception: 
+            pass
 
-    if encodings:
-        print(f"Clustering {len(encodings)} face vectors using all available threads...")
-        clt = DBSCAN(metric="euclidean", n_jobs=-1, eps=0.45, min_samples=3)
-        clt.fit(encodings)
-        
-        updates = [(int(cid), fid) for fid, cid in zip(face_ids, clt.labels_)]
+    # Create an average 128-d vector profile for each known person
+    anchor_profiles = {}
+    for name, encs in anchors.items():
+        anchor_profiles[name] = np.mean(encs, axis=0)
+
+    # 2. Fetch Unknown Faces
+    cursor.execute("SELECT id, encoding FROM faces WHERE person_name IS NULL AND exclude_from_ml = 0 AND encoding IS NOT NULL")
+    unknown_rows = cursor.fetchall()
+
+    if not unknown_rows:
+        print("No unknown faces to cluster.")
+        conn.close()
+        return
+
+    unknown_ids = []
+    unknown_encs = []
+    for row_id, blob in unknown_rows:
+        try:
+            unknown_ids.append(row_id)
+            unknown_encs.append(np.frombuffer(blob, dtype=np.float64))
+        except Exception: 
+            pass
+
+    # 3. Match Unknowns to Anchors First
+    print(f"Comparing {len(unknown_encs)} unknown faces against {len(anchor_profiles)} known profiles...")
+    leftover_ids = []
+    leftover_encs = []
+    matches_found = 0
+
+    for f_id, enc in zip(unknown_ids, unknown_encs):
+        best_match_name = None
+        best_distance = 0.42 # Strict distance threshold for a guaranteed match
+
+        for name, profile in anchor_profiles.items():
+            dist = np.linalg.norm(profile - enc) # Euclidean distance
+            if dist < best_distance:
+                best_distance = dist
+                best_match_name = name
+
+        if best_match_name:
+            # Auto-tag the face and remove it from the clustering pool (-1)
+            cursor.execute("UPDATE faces SET person_name = ?, cluster_id = -1 WHERE id = ?", (best_match_name, f_id))
+            matches_found += 1
+        else:
+            leftover_ids.append(f_id)
+            leftover_encs.append(enc)
+
+    print(f"Auto-tagged {matches_found} faces based on your manual tags.")
+
+    # 4. Run stricter DBSCAN on the leftovers
+    if leftover_encs:
+        print(f"Running strict DBSCAN on the remaining {len(leftover_encs)} unknown faces...")
+        # eps reduced to 0.38 to prevent the "Mega-Cluster" chaining effect. min_samples raised to 4.
+        clt = DBSCAN(metric="euclidean", n_jobs=-1, eps=0.38, min_samples=4)
+        clt.fit(leftover_encs)
+
+        cluster_ids = clt.labels_
+        unique_clusters = len(set(cluster_ids)) - (1 if -1 in cluster_ids else 0)
+        print(f"Grouped remaining faces into {unique_clusters} new unknown clusters.")
+
+        updates = [(int(cid), fid) for fid, cid in zip(leftover_ids, cluster_ids)]
         cursor.executemany("UPDATE faces SET cluster_id = ? WHERE id = ?", updates)
-        
-        unique_clusters = len(set(clt.labels_)) - (1 if -1 in clt.labels_ else 0)
-        print(f"Grouped into {unique_clusters} distinct people.")
 
     conn.commit()
     conn.close()
-    print("Clean Slate complete! Ready for UI tagging.")
+    print("Pipeline Complete! Ready for UI interaction.")
 
 if __name__ == "__main__":
     process_batch_extraction()
