@@ -91,6 +91,12 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_person_name ON faces(person_name)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_cluster_id ON faces(cluster_id)")
     
+    try:
+        cursor.execute("ALTER TABLE media ADD COLUMN file_hash TEXT")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_hash ON media(file_hash)")
+    except sqlite3.OperationalError:
+        pass # The column already exists
+
     conn.commit()
     conn.close()
 
@@ -195,6 +201,15 @@ def get_fallback_date(file_path, exif_date_str):
             except ValueError: continue
     return datetime.fromtimestamp(file_path.stat().st_mtime)
 
+def get_file_hash(filepath):
+    """Generates a fast, unique cryptographic signature of the file's bytes."""
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        # Read in 8KB chunks to keep memory usage flat
+        while chunk := f.read(8192):
+            h.update(chunk)
+    return h.hexdigest()
+
 def compress_and_move(source_path, target_dir, original_name, file_type, ext):
     target_path = target_dir / original_name
     counter = 1
@@ -248,8 +263,7 @@ def compress_and_move(source_path, target_dir, original_name, file_type, ext):
         cmd = [
             "ffmpeg", "-y", "-i", str(source_path), 
             "-map_metadata", "0", 
-            "-c:v", "libx265", "-crf", "28", "-preset", "medium", 
-            "-x265-params", "pools=1",
+            "-c:v", "libx265", "-crf", "23", "-preset", "medium", 
             "-c:a", "aac", "-b:a", "128k", "-async", "1",
             "-threads", "1",
             "-v", "quiet", str(new_target)
@@ -354,7 +368,7 @@ def extract_faces_worker(final_target_path, file_type, thumb_path):
     return extracted_faces
 
 def process_single_file_worker(args):
-    file_path, source_name = args
+    file_path, source_name, file_signature = args  
     ext = file_path.suffix.lower()
     
     image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
@@ -417,17 +431,19 @@ def process_single_file_worker(args):
         "latitude": m["lat"],
         "longitude": m["lon"],
         "location_name": location_str,
+        "file_hash": file_signature,
         "faces": faces_data
     }
 
 def process_staging():
     print("--- Starting Parallel Media Pipeline ---")
     
-    # Open DB, fetch names, and IMMEDIATELY CLOSE IT to prevent POSIX lock inheritance
+    # Open DB, fetch hashes, and IMMEDIATELY CLOSE IT to prevent POSIX lock inheritance
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT original_name FROM media")
-    existing_names = {row[0] for row in cursor.fetchall()}
+    # NEW: We now track the file's unique digital signature, not its unreliable name
+    cursor.execute("SELECT file_hash FROM media WHERE file_hash IS NOT NULL")
+    existing_hashes = {row[0] for row in cursor.fetchall()}
     conn.close() 
     
     image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.heic'}
@@ -437,7 +453,7 @@ def process_staging():
     audio_exts = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'}
     valid_exts = image_exts | raw_exts | video_exts | doc_exts | audio_exts
     
-    queued_names = set()
+    queued_hashes = set()
     all_tasks = []
     duplicates_skipped = 0
 
@@ -446,12 +462,30 @@ def process_staging():
             if file_path.is_dir() or file_path.suffix.lower() not in valid_exts:
                 continue
             
-            if file_path.name in existing_names or file_path.name in queued_names:
+            # Instantly read the bytes to get the signature
+            file_signature = get_file_hash(file_path)
+            
+            if file_signature in existing_hashes or file_signature in queued_hashes:
                 duplicates_skipped += 1
                 continue
                 
-            queued_names.add(file_path.name)
-            all_tasks.append((file_path, source_name))
+            queued_hashes.add(file_signature)
+
+            # NEW: Dynamic Source Resolution
+            # If it came from the 'me' folder, check if it was actually in a 'Camera' subfolder
+            actual_source = source_name
+            if source_name == "me":
+                if "Camera" not in file_path.parts:
+                    # It's not a camera photo. Use the immediate parent folder name instead.
+                    # e.g., "staging/me/DCIM/Snapchat/file.mp4" -> source becomes "snapchat"
+                    parent_dir = file_path.parent.name
+                    if parent_dir.lower() not in ["me", "dcim"]:
+                        actual_source = parent_dir.lower()
+                    else:
+                        actual_source = "misc"
+
+            # Pass the newly resolved actual_source into the worker task
+            all_tasks.append((file_path, actual_source, file_signature))
 
     total_tasks = len(all_tasks)
     print(f"Found {total_tasks} new files to process. (Skipped {duplicates_skipped} duplicates).")
@@ -482,14 +516,14 @@ def process_staging():
                         INSERT INTO media 
                         (original_name, current_path, file_type, source, date_taken, 
                         file_size_kb, width, height, camera_model, f_stop, exposure_time, 
-                        iso, flash_fired, latitude, longitude, location_name)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        iso, flash_fired, latitude, longitude, location_name, file_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         result["original_name"], result["current_path"], result["file_type"], 
                         result["source"], result["date_taken"], result["file_size_kb"], 
                         result["width"], result["height"], result["camera_model"], result["f_stop"], 
                         result["exposure_time"], result["iso"], result["flash_fired"], 
-                        result["latitude"], result["longitude"], result["location_name"]
+                        result["latitude"], result["longitude"], result["location_name"], result["file_hash"]
                     ))
                     
                     media_id = cursor.lastrowid
@@ -518,12 +552,19 @@ def process_staging():
     print(f"Parallel pipeline finished. Successfully indexed {files_processed} files.")
 
 def cluster_faces():
-    """Runs a semi-supervised clustering sweep using known anchors to prevent chaining."""
-    print("\n--- Running Smart Facial Clustering ---")
+    """Runs a semi-supervised clustering sweep using Hybrid (Average + Nearest Neighbor) logic."""
+    print("\n--- Running Smart Facial Clustering (Hybrid) ---")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # 1. Gather Known Anchors (Faces you have already manually tagged)
+    # 1. Nuke bad auto-tags so the system can re-evaluate any manual corrections
+    cursor.execute("UPDATE faces SET person_name = NULL, cluster_id = NULL WHERE cluster_id = -1")
+    
+    # 2. Clear old junk untagged clusters
+    cursor.execute("UPDATE faces SET cluster_id = NULL WHERE person_name IS NULL")
+    conn.commit()
+
+    # 3. Gather Known Anchors (Manual Tags Only)
     cursor.execute("SELECT person_name, encoding FROM faces WHERE person_name IS NOT NULL AND exclude_from_ml = 0 AND encoding IS NOT NULL")
     known_rows = cursor.fetchall()
 
@@ -537,12 +578,12 @@ def cluster_faces():
         except Exception: 
             pass
 
-    # Create an average 128-d vector profile for each known person
+    # Calculate Average Profiles for bulk matching
     anchor_profiles = {}
     for name, encs in anchors.items():
         anchor_profiles[name] = np.mean(encs, axis=0)
 
-    # 2. Fetch Unknown Faces
+    # 4. Fetch Unknown Faces
     cursor.execute("SELECT id, encoding FROM faces WHERE person_name IS NULL AND exclude_from_ml = 0 AND encoding IS NOT NULL")
     unknown_rows = cursor.fetchall()
 
@@ -560,24 +601,31 @@ def cluster_faces():
         except Exception: 
             pass
 
-    # 3. Match Unknowns to Anchors First
-    print(f"Comparing {len(unknown_encs)} unknown faces against {len(anchor_profiles)} known profiles...")
+    # 5. Hybrid Matching: Best of Both Worlds
+    print(f"Comparing {len(unknown_encs)} unknown faces against Hybrid profiles...")
     leftover_ids = []
     leftover_encs = []
     matches_found = 0
 
     for f_id, enc in zip(unknown_ids, unknown_encs):
         best_match_name = None
-        best_distance = 0.42 # Strict distance threshold for a guaranteed match
+        best_distance = 0.42 # Strict threshold
 
-        for name, profile in anchor_profiles.items():
-            dist = np.linalg.norm(profile - enc) # Euclidean distance
-            if dist < best_distance:
-                best_distance = dist
+        for name, enc_list in anchors.items():
+            # Check 1: Distance to Average Profile
+            avg_dist = np.linalg.norm(anchor_profiles[name] - enc)
+            
+            # Check 2: Distance to Nearest Individual Manual Tag
+            distances = np.linalg.norm(enc_list - enc, axis=1)
+            nn_dist = np.min(distances)
+            
+            min_dist = min(avg_dist, nn_dist)
+            
+            if min_dist < best_distance:
+                best_distance = min_dist
                 best_match_name = name
 
         if best_match_name:
-            # Auto-tag the face and remove it from the clustering pool (-1)
             cursor.execute("UPDATE faces SET person_name = ?, cluster_id = -1 WHERE id = ?", (best_match_name, f_id))
             matches_found += 1
         else:
@@ -586,10 +634,9 @@ def cluster_faces():
 
     print(f"Auto-tagged {matches_found} faces based on your manual tags.")
 
-    # 4. Run stricter DBSCAN on the leftovers
+    # 6. Run stricter DBSCAN on the leftovers
     if leftover_encs:
         print(f"Running strict DBSCAN on the remaining {len(leftover_encs)} unknown faces...")
-        # eps reduced to 0.38 to prevent the "Mega-Cluster" chaining effect. min_samples raised to 4.
         clt = DBSCAN(metric="euclidean", n_jobs=-1, eps=0.38, min_samples=4)
         clt.fit(leftover_encs)
 

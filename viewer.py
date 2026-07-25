@@ -36,6 +36,13 @@ HTML_TEMPLATE = """
         .batch-toggle-btn { padding: 8px 15px; background: #2a2a2a; color: #fff; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
         .batch-toggle-btn.active { background: #00bfff; border-color: #00bfff; color: #000; }
 
+        /* QUICK VIEWS (PILLS) */
+        .quick-views { display: flex; gap: 10px; margin-bottom: 20px; overflow-x: auto; padding-bottom: 5px; scrollbar-width: none; }
+        .quick-views::-webkit-scrollbar { display: none; }
+        .quick-pill { padding: 8px 18px; background: #2a2a2a; color: #ccc; border-radius: 20px; text-decoration: none; font-size: 0.9em; font-weight: bold; white-space: nowrap; border: 1px solid #444; transition: all 0.2s ease; display: flex; align-items: center; gap: 6px; }
+        .quick-pill:hover { background: #3a3a3a; color: #fff; border-color: #666; transform: translateY(-1px); }
+        .quick-pill.active { background: #00bfff; color: #000; border-color: #00bfff; box-shadow: 0 4px 10px rgba(0, 191, 255, 0.2); }
+
         .header-container { background: #1e1e1e; padding: 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #333; }
         .search-form { display: flex; flex-direction: column; gap: 15px; }
         .filter-row { display: flex; gap: 15px; flex-wrap: wrap; align-items: flex-end; }
@@ -120,8 +127,21 @@ HTML_TEMPLATE = """
         <button id="batchToggleBtn" class="batch-toggle-btn" onclick="toggleBatchMode()">Batch Tag Mode</button>
     </div>
 
+    <!-- NEW: Quick View Filters -->
+    <div class="quick-views">
+        <a href="/?view=camera" class="quick-pill {% if current_view == 'camera' %}active{% endif %}">📸 My Camera</a>
+        <a href="/?view=shared" class="quick-pill {% if current_view == 'shared' %}active{% endif %}">👥 Shared</a>
+        <a href="/?view=whatsapp" class="quick-pill {% if current_view == 'whatsapp' %}active{% endif %}">💬 WhatsApp</a>
+        <a href="/?view=snapchat" class="quick-pill {% if current_view == 'snapchat' %}active{% endif %}">👻 Snapchat</a>
+        <a href="/?view=documents" class="quick-pill {% if current_view == 'documents' %}active{% endif %}">📄 Documents</a>
+        <a href="/?view=all" class="quick-pill {% if current_view == 'all' %}active{% endif %}">♾️ Everything</a>
+    </div>
+
     <div class="header-container">
         <form class="search-form" method="GET" action="/">
+            <!-- Keep the view state active during searches -->
+            <input type="hidden" name="view" value="{{ current_view }}">
+            
             <div class="filter-row">
                 <div class="input-group">
                     <span class="filter-label">Person</span>
@@ -130,15 +150,7 @@ HTML_TEMPLATE = """
                         <div id="personDropdown" class="autocomplete-dropdown"></div>
                     </div>
                 </div>
-                <div class="input-group">
-                    <span class="filter-label">Primary Source</span>
-                    <select name="source">
-                        <option value="">All Sources</option>
-                        <option value="me" {% if request.args.get('source') == 'me' %}selected{% endif %}>My Camera</option>
-                        <option value="shared" {% if request.args.get('source') == 'shared' %}selected{% endif %}>Shared</option>
-                        <option value="misc" {% if request.args.get('source') == 'misc' %}selected{% endif %}>Misc</option>
-                    </select>
-                </div>
+                
                 <div class="input-group">
                     <span class="filter-label">Start Date</span>
                     <input type="date" name="start_date" value="{{ request.args.get('start_date', '') }}">
@@ -172,16 +184,6 @@ HTML_TEMPLATE = """
                         <div id="filenameDropdown" class="autocomplete-dropdown"></div>
                     </div>
                 </div>
-
-                <div class="input-group">
-                    <span class="filter-label">File Type</span>
-                    <select name="file_type">
-                        <option value="">All File Types</option>
-                        <option value="image" {% if request.args.get('file_type') == 'image' %}selected{% endif %}>Images Only</option>
-                        <option value="video" {% if request.args.get('file_type') == 'video' %}selected{% endif %}>Videos Only</option>
-                        <option value="document" {% if request.args.get('file_type') == 'document' %}selected{% endif %}>Documents Only</option>
-                    </select>
-                </div>
                 
                 <div class="input-group" style="width: 160px;">
                     <span class="filter-label">Sort By</span>
@@ -194,7 +196,7 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div style="display: flex; flex-grow: 1; justify-content: flex-end; gap: 10px;">
-                    <a href="/" class="clear-btn">Reset</a>
+                    <a href="/?view={{ current_view }}" class="clear-btn">Reset Filters</a>
                     <button type="submit">Search</button>
                 </div>
             </div>
@@ -239,18 +241,21 @@ HTML_TEMPLATE = """
     </div>
     {% endif %}
 
+    <!-- LIGHTBOX -->
     <div id="lightboxModal" class="modal" onclick="closeLightbox(event)">
         <span class="counter" id="modalCounter"></span>
         <span class="modal-close" onclick="closeLightbox(event)">&times;</span>
         <div class="nav-btn prev-btn" style="left:10px;" onclick="navigate(-1, event)">&#10094;</div>
-        
         <div class="modal-content-wrapper">
             <img class="modal-content" id="modalImg" draggable="false" onclick="event.stopPropagation();">
             <video class="modal-content" id="modalVid" controls onclick="event.stopPropagation();"></video>
             <div id="faceOverlay"></div>
+            
+            <button id="nativeVidBtn" onclick="openCurrentVideoNatively(event)" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); background:#dc3545; color:white; padding:15px 25px; border-radius:8px; font-size:1.1em; z-index:1002; cursor:pointer; border:none; box-shadow: 0 4px 15px rgba(0,0,0,0.8);">
+                ⚠️ Browser Cannot Play This Codec<br><span style="font-size:0.85em; font-weight:normal;">Click to open in Desktop Player</span>
+            </button>
         </div>
-        
-        <div class="nav-btn next-btn" style="right:10px;" onclick="navigate(1, event)">&#10095;</div>
+                <div class="nav-btn next-btn" style="right:10px;" onclick="navigate(1, event)">&#10095;</div>
         
         <div class="floating-tag-bar" onclick="event.stopPropagation();">
             <button id="inspectToggleBtn" class="inspect-btn" onclick="toggleInspector()">👁️ Inspect Faces</button>
@@ -277,6 +282,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- BATCH TAGGING BAR -->
     <div id="batchTagBar" class="floating-tag-bar" style="display: none;">
         <span id="batchCount" style="color: #00bfff; font-weight: bold; width: 60px;">0 Selected</span>
         <div class="autocomplete-wrapper" style="overflow: visible;">
@@ -288,6 +294,18 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        function openCurrentVideoNatively(event) {
+            if (event) event.stopPropagation();
+            const urlParams = new URLSearchParams(galleryData[currentIndex].src.split('?')[1]);
+            const filePath = decodeURIComponent(urlParams.get('path'));
+            
+            fetch('/api/open_system', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: filePath })
+            }).catch(e => console.error("Failed to trigger local file open", e));
+        }
+
         function changePage(newPage) {
             const url = new URL(window.location.href);
             url.searchParams.set('page', newPage);
@@ -328,11 +346,9 @@ HTML_TEMPLATE = """
                 document.getElementById('batchCount').innerText = `${selectedPaths.size} Selected`;
             } else { 
                 if (galleryData[index].type === 'document') {
-                    // Extract the raw file path from the src URL
                     const urlParams = new URLSearchParams(galleryData[index].src.split('?')[1]);
                     const filePath = decodeURIComponent(urlParams.get('path'));
                     
-                    // Ping the Flask backend to open it locally
                     fetch('/api/open_system', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -344,10 +360,16 @@ HTML_TEMPLATE = """
                 }
             }
         }
-        
+
         const modal = document.getElementById('lightboxModal');
         const modalImg = document.getElementById('modalImg');
         const modalVid = document.getElementById('modalVid');
+        const nativeVidBtn = document.getElementById('nativeVidBtn');
+
+        modalVid.addEventListener('error', function(e) {
+            nativeVidBtn.style.display = 'block';
+        });
+
         const faceOverlay = document.getElementById('faceOverlay');
         const boxTagger = document.getElementById('boxTagger');
 
@@ -391,6 +413,7 @@ HTML_TEMPLATE = """
         });
 
         function openLightbox(index) {
+            nativeVidBtn.style.display = 'none';
             if (index < 0 || index >= galleryData.length || galleryData[index].type === 'document') return;
             currentIndex = index;
             const item = galleryData[currentIndex];
@@ -703,9 +726,12 @@ PEOPLE_HTML_TEMPLATE = """
         .top-nav a { color: #888; text-decoration: none; font-size: 1.2em; font-weight: bold; transition: color 0.2s; }
         .top-nav a.active { color: #00bfff; }
         .top-nav a:hover { color: #fff; }
-        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        
+        .tabs-container { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .tabs { display: flex; gap: 10px; margin: 0; }
         .tab-btn { padding: 10px 20px; background: #2a2a2a; color: #888; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 1em; }
         .tab-btn.active { background: #007bff; color: #fff; border-color: #007bff; }
+        
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
         .person-card { background: #1e1e1e; border-radius: 8px; overflow: hidden; border: 1px solid #333; text-align: center; padding-bottom: 15px; }
         .person-card img { width: 100%; height: 200px; object-fit: cover; }
@@ -726,11 +752,22 @@ PEOPLE_HTML_TEMPLATE = """
         <a href="/">📷 Media Archive</a>
         <a href="/people" class="active">👥 People & Faces</a>
     </div>
-    <div class="tabs">
-        <button class="tab-btn active" onclick="switchTab('unnamed')">Inbox: Who is this?</button>
-        <button class="tab-btn" onclick="switchTab('named')">Gallery: Named People</button>
+    
+    <div class="tabs-container">
+        <div class="tabs">
+            <button class="tab-btn" id="btn-unnamed" onclick="switchTab('unnamed')">Inbox: Who is this?</button>
+            <button class="tab-btn active" id="btn-named" onclick="switchTab('named')">Gallery: Named People</button>
+        </div>
+        
+        <div id="named-controls" style="display: block;">
+            <select id="namedSort" onchange="updateSort()" style="padding: 8px; background: #2a2a2a; color: white; border: 1px solid #444; border-radius: 6px; outline: none;">
+                <option value="count_desc" {% if request.args.get('sort_named') != 'name_asc' %}selected{% endif %}>Sort by: Most Photos</option>
+                <option value="name_asc" {% if request.args.get('sort_named') == 'name_asc' %}selected{% endif %}>Sort by: Name (A-Z)</option>
+            </select>
+        </div>
     </div>
-    <div id="unnamed-tab" class="grid">
+
+    <div id="unnamed-tab" class="grid" style="display: none;">
         {% for c in unnamed %}
         <div class="person-card" id="cluster-{{ c.cluster_id }}">
             <a href="/?person=cluster:{{ c.cluster_id }}" target="_blank"><img src="/thumbnail?path={{ c.sample_path | urlencode }}&type={{ c.file_type }}"></a>
@@ -743,7 +780,8 @@ PEOPLE_HTML_TEMPLATE = """
         </div>
         {% endfor %}
     </div>
-    <div id="named-tab" class="grid" style="display: none;">
+    
+    <div id="named-tab" class="grid">
         {% for p in named %}
         <a href="/?person={{ p.person_name | urlencode }}" class="gallery-link">
             <div class="person-card">
@@ -753,13 +791,34 @@ PEOPLE_HTML_TEMPLATE = """
         </a>
         {% endfor %}
     </div>
+    
     <script>
         function switchTab(tabName) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            document.getElementById('btn-' + tabName).classList.add('active');
+            
             document.getElementById('unnamed-tab').style.display = tabName === 'unnamed' ? 'grid' : 'none';
             document.getElementById('named-tab').style.display = tabName === 'named' ? 'grid' : 'none';
+            document.getElementById('named-controls').style.display = tabName === 'named' ? 'block' : 'none';
+            
+            const url = new URL(window.location);
+            url.searchParams.set('tab', tabName);
+            window.history.pushState({}, '', url);
         }
+        
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('tab') === 'unnamed') {
+            switchTab('unnamed');
+        }
+
+        function updateSort() {
+            const val = document.getElementById('namedSort').value;
+            const url = new URL(window.location);
+            url.searchParams.set('sort_named', val);
+            url.searchParams.set('tab', 'named'); 
+            window.location.href = url.toString();
+        }
+
         function handleEnter(event, clusterId) { if (event.key === 'Enter') submitName(clusterId); }
         
         async function submitName(clusterId) {
@@ -805,7 +864,6 @@ def open_system():
         return jsonify({"error": "File not found"}), 404
         
     try:
-        # Launch the file using the host OS's default desktop application
         if sys.platform.startswith('linux'):
             subprocess.run(["xdg-open", file_path], check=True)
         elif sys.platform == "win32":
@@ -857,7 +915,6 @@ def delete_cluster():
     cluster_id = request.json.get("cluster_id")
     if cluster_id is None: return jsonify({"error": "Missing ID"}), 400
     conn = get_db_connection()
-    # Only delete unnamed clusters to prevent accidental deletion of legitimate tagged data
     conn.execute("DELETE FROM faces WHERE cluster_id = ? AND person_name IS NULL", (cluster_id,))
     conn.commit()
     conn.close()
@@ -932,7 +989,8 @@ def tag_specific_face():
     exclude_from_ml = 1 if data.get("exclude_from_ml") else 0
     if not face_id or not person_name: return jsonify({"error": "Missing data"}), 400
     conn = get_db_connection()
-    conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = ? WHERE id = ?", (person_name.strip(), exclude_from_ml, face_id))
+    # STRIPS the -1 machine-guess flag when a human corrects a face
+    conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = ?, cluster_id = NULL WHERE id = ?", (person_name.strip(), exclude_from_ml, face_id))
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -1012,13 +1070,15 @@ def add_manual_tag():
         
         existing = conn.execute("SELECT id FROM faces WHERE media_id = ? AND person_name = ?", (media_id, person_clean)).fetchone()
         if existing:
-            conn.execute("UPDATE faces SET exclude_from_ml = ? WHERE id = ?", (exclude_from_ml, existing[0]))
+            # STRIPS the -1 flag on existing faces
+            conn.execute("UPDATE faces SET exclude_from_ml = ?, cluster_id = NULL WHERE id = ?", (exclude_from_ml, existing[0]))
             continue
 
         if exclude_from_ml == 0:
             ml_faces = conn.execute("SELECT id FROM faces WHERE media_id = ? AND encoding IS NOT NULL", (media_id,)).fetchall()
             if len(ml_faces) == 1:
-                conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = 0 WHERE id = ?", (person_clean, ml_faces[0][0]))
+                # STRIPS the -1 flag when tagging a known ML face
+                conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = 0, cluster_id = NULL WHERE id = ?", (person_clean, ml_faces[0][0]))
             else:
                 conn.execute("INSERT INTO faces (media_id, person_name, exclude_from_ml) VALUES (?, ?, ?)", (media_id, person_clean, exclude_from_ml))
         else:
@@ -1034,7 +1094,8 @@ def name_cluster():
     if data.get("cluster_id") is None or not data.get("person_name"): 
         return jsonify({"error": "Invalid data"}), 400
     conn = get_db_connection()
-    conn.execute("UPDATE faces SET person_name = ? WHERE cluster_id = ?", (data["person_name"].strip(), data["cluster_id"]))
+    # Converts an unknown inbox cluster into pure human anchors
+    conn.execute("UPDATE faces SET person_name = ?, cluster_id = NULL WHERE cluster_id = ?", (data["person_name"].strip(), data["cluster_id"]))
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -1071,10 +1132,14 @@ def serve_file():
 
 @app.route("/people")
 def people_manager():
+    sort_named = request.args.get("sort_named", "count_desc")
+    order_clause = "f.person_name ASC" if sort_named == "name_asc" else "face_count DESC"
+
     conn = get_db_connection()
     unnamed = conn.execute("SELECT f.cluster_id, COUNT(f.id) as face_count, m.current_path as sample_path, m.file_type FROM faces f JOIN media m ON f.media_id = m.id WHERE f.person_name IS NULL AND f.cluster_id != -1 AND f.exclude_from_ml = 0 GROUP BY f.cluster_id ORDER BY face_count DESC").fetchall()
-    named = conn.execute("SELECT f.person_name, COUNT(f.id) as face_count, MIN(m.current_path) as sample_path, m.file_type FROM faces f JOIN media m ON f.media_id = m.id WHERE f.person_name IS NOT NULL GROUP BY f.person_name ORDER BY f.person_name ASC").fetchall()
+    named = conn.execute(f"SELECT f.person_name, COUNT(f.id) as face_count, MIN(m.current_path) as sample_path, m.file_type FROM faces f JOIN media m ON f.media_id = m.id WHERE f.person_name IS NOT NULL GROUP BY f.person_name ORDER BY {order_clause}").fetchall()
     conn.close()
+    
     return render_template_string(PEOPLE_HTML_TEMPLATE, unnamed=unnamed, named=named)
 
 # --- MAIN ARCHIVE ROUTE ---
@@ -1083,13 +1148,25 @@ def index():
     try: page = int(request.args.get("page", 1))
     except ValueError: page = 1
 
-    source = request.args.get("source", "")
+    # Extract the requested quick view parameter
+    view_param = request.args.get("view")
+    
+    # If the user is running a specific manual search, we don't want to force a default view
+    is_searching = any(request.args.get(k) for k in ['person', 'start_date', 'end_date', 'camera', 'location', 'name'])
+    
+    if not view_param and not is_searching:
+        current_view = "camera" # Default view behavior
+    elif not view_param:
+        current_view = "all"
+    else:
+        current_view = view_param
+
+    # We removed source and file_type from the advanced form to declutter it
     start_date = request.args.get("start_date", "")
     end_date = request.args.get("end_date", "")
     camera = request.args.get("camera", "")
     location = request.args.get("location", "")
     name = request.args.get("name", "")
-    file_type = request.args.get("file_type", "")
     person = request.args.get("person", "") 
     
     sort_param = request.args.get("sort", "date_desc")
@@ -1102,6 +1179,20 @@ def index():
     conditions = ""
     params = []
     
+    # --- Apply Quick View Filters ---
+    if current_view == "camera":
+        conditions += " AND source = 'me' AND file_type IN ('image', 'video')"
+    elif current_view == "shared":
+        conditions += " AND source = 'shared' AND file_type IN ('image', 'video')"
+    elif current_view == "whatsapp":
+        # Safe match for WhatsApp prefixes or original names containing 'WA'
+        conditions += " AND (original_name LIKE '%WA0%' OR original_name LIKE '%WhatsApp%') AND file_type IN ('image', 'video')"
+    elif current_view == "snapchat":
+        conditions += " AND original_name LIKE '%Snapchat%' AND file_type IN ('image', 'video')"
+    elif current_view == "documents":
+        conditions += " AND file_type = 'document'"
+        
+    # --- Apply Standard Manual Filters ---
     if person:
         if person.startswith("cluster:"):
             conditions += " AND media.id IN (SELECT media_id FROM faces WHERE cluster_id = ?)"
@@ -1111,13 +1202,11 @@ def index():
                 conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name LIKE ?)"
                 params.append(f"%{p}%")
 
-    if source: conditions += " AND source = ?"; params.append(source)
     if camera: conditions += " AND camera_model LIKE ?"; params.append(f"%{camera}%")
     if location: conditions += " AND location_name LIKE ?"; params.append(f"%{location}%")
     if start_date: conditions += " AND date_taken >= ?"; params.append(start_date + " 00:00:00")
     if end_date: conditions += " AND date_taken <= ?"; params.append(end_date + " 23:59:59")
     if name: conditions += " AND original_name LIKE ?"; params.append(f"%{name}%")
-    if file_type: conditions += " AND file_type = ?"; params.append(file_type)
     
     conn = get_db_connection()
     total_count = conn.execute(f"SELECT COUNT(*) FROM media WHERE 1=1 {conditions}", params).fetchone()[0]
@@ -1138,7 +1227,7 @@ def index():
     results = conn.execute(data_query, params + [offset]).fetchall()
     conn.close()
     
-    return render_template_string(HTML_TEMPLATE, results=results, page=page, total_pages=total_pages, total_count=total_count)
+    return render_template_string(HTML_TEMPLATE, results=results, page=page, total_pages=total_pages, total_count=total_count, current_view=current_view)
 
 
 if __name__ == "__main__":
