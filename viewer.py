@@ -1383,6 +1383,7 @@ def index():
     elif current_view == "favorites":
         conditions += " AND is_favorite = 1"       
 
+
     # --- Apply Standard Manual Filters ---
     if person:
         if person.startswith("cluster:"):
@@ -1391,8 +1392,9 @@ def index():
         else:
             # Force search inputs to lower case as well to match the database
             for p in [p.strip().lower() for p in person.split(",") if p.strip()]:
-                conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name LIKE ?)"
-                params.append(f"%{p}%")
+                # FIX: Changed LIKE to strict equality (=) and removed the % wildcards
+                conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name = ?)"
+                params.append(p)
 
     if camera: conditions += " AND camera_model LIKE ?"; params.append(f"%{camera}%")
     if location: conditions += " AND location_name LIKE ?"; params.append(f"%{location}%")
