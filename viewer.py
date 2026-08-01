@@ -70,6 +70,11 @@ HTML_TEMPLATE = """
         .card.selected { border: 3px solid #00bfff; transform: scale(0.98); }
         .card.selected::after { content: '✓'; position: absolute; top: 10px; right: 10px; background: #00bfff; color: #000; width: 25px; height: 25px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; pointer-events: none; }
 
+        /* Favorite Star Logic */
+        .favorite-btn { position: absolute; top: 10px; left: 10px; font-size: 2em; color: rgba(255,255,255,0.4); cursor: pointer; z-index: 5; transition: 0.2s; text-shadow: 0 2px 4px rgba(0,0,0,0.8); user-select: none; line-height: 1; }
+        .favorite-btn:hover { transform: scale(1.15); color: #fff; }
+        .favorite-btn.favorited { color: #ffd700; opacity: 1; }
+
         .media-container { height: 200px; width: 100%; background: #0b0b0b; display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; position: relative; }
         .media-container img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; transition: transform 0.2s; }
         .media-container:hover img { transform: scale(1.03); opacity: 0.8; }
@@ -107,10 +112,15 @@ HTML_TEMPLATE = """
         .face-box.tagged { border-color: rgba(40, 167, 69, 0.8); background: rgba(40, 167, 69, 0.1); }
         .face-box.tagged:hover { border-color: #28a745; background: rgba(40, 167, 69, 0.3); }
 
-        /* Delete Button for Boxes */
+        /* Delete Button for Boxes & General Tags */
         .delete-box-btn { position: absolute; top: -12px; right: -12px; background: #dc3545; color: white; border-radius: 50%; width: 24px; height: 24px; text-align: center; line-height: 22px; font-weight: bold; cursor: pointer; font-size: 14px; display: none; z-index: 11; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
         .face-box:hover .delete-box-btn { display: block; }
         .delete-box-btn:hover { background: #c82333; transform: scale(1.1); }
+        
+        .general-tags-container { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 10px 15px; border-radius: 8px; display: flex; gap: 10px; align-items: center; z-index: 1005; flex-wrap: wrap; max-width: 90%; pointer-events: auto; }
+        .tag-pill { background: #28a745; color: white; padding: 4px 10px; border-radius: 15px; font-size: 0.9em; display: flex; align-items: center; gap: 6px; font-weight: bold;}
+        .tag-pill .remove-tag { cursor: pointer; font-weight: bold; font-size: 1.1em; background: rgba(0,0,0,0.2); border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; }
+        .tag-pill .remove-tag:hover { background: rgba(255,255,255,0.3); }
 
         #boxTagger { position: absolute; z-index: 1003; background: #1e1e1e; border: 1px solid #444; border-radius: 6px; padding: 10px; display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.8); }
         #boxTagger input { background: #121212; border: 1px solid #555; color: white; padding: 6px 10px; border-radius: 4px; width: 150px; outline: none;}
@@ -127,19 +137,19 @@ HTML_TEMPLATE = """
         <button id="batchToggleBtn" class="batch-toggle-btn" onclick="toggleBatchMode()">Batch Tag Mode</button>
     </div>
 
-    <!-- NEW: Quick View Filters -->
+    <!-- NEW: Quick View Filters (with Favorites) -->
     <div class="quick-views">
         <a href="/?view=camera" class="quick-pill {% if current_view == 'camera' %}active{% endif %}">📸 My Camera</a>
         <a href="/?view=shared" class="quick-pill {% if current_view == 'shared' %}active{% endif %}">👥 Shared</a>
         <a href="/?view=whatsapp" class="quick-pill {% if current_view == 'whatsapp' %}active{% endif %}">💬 WhatsApp</a>
         <a href="/?view=snapchat" class="quick-pill {% if current_view == 'snapchat' %}active{% endif %}">👻 Snapchat</a>
         <a href="/?view=documents" class="quick-pill {% if current_view == 'documents' %}active{% endif %}">📄 Documents</a>
+        <a href="/?view=favorites" class="quick-pill {% if current_view == 'favorites' %}active{% endif %}" style="border-color: #ffd700; color: #ffd700;">⭐ Favorites</a>
         <a href="/?view=all" class="quick-pill {% if current_view == 'all' %}active{% endif %}">♾️ Everything</a>
     </div>
 
     <div class="header-container">
         <form class="search-form" method="GET" action="/">
-            <!-- Keep the view state active during searches -->
             <input type="hidden" name="view" value="{{ current_view }}">
             
             <div class="filter-row">
@@ -206,6 +216,11 @@ HTML_TEMPLATE = """
     <div class="grid">
         {% for item in results %}
         <div class="card" id="card-{{ loop.index0 }}" onclick="handleMediaClick({{ loop.index0 }}, '{{ item.current_path | urlencode }}')">
+            <!-- ⭐ Favorite Button -->
+            <div class="favorite-btn {% if item.is_favorite %}favorited{% endif %}" onclick="event.stopPropagation(); toggleFavorite({{ item.id }}, {{ item.is_favorite | default(0) }}, this)">
+                {% if item.is_favorite %}★{% else %}☆{% endif %}
+            </div>
+
             <div class="media-container">
                 {% if item.file_type == 'image' %}
                     <img src="/thumbnail?path={{ item.current_path | urlencode }}&type=image" loading="lazy">
@@ -255,9 +270,10 @@ HTML_TEMPLATE = """
                 ⚠️ Browser Cannot Play This Codec<br><span style="font-size:0.85em; font-weight:normal;">Click to open in Desktop Player</span>
             </button>
         </div>
-                <div class="nav-btn next-btn" style="right:10px;" onclick="navigate(1, event)">&#10095;</div>
+        <div class="nav-btn next-btn" style="right:10px;" onclick="navigate(1, event)">&#10095;</div>
         
         <div class="floating-tag-bar" onclick="event.stopPropagation();">
+            <button id="lightboxFavBtn" onclick="toggleLightboxFavorite()" style="background: #2a2a2a; border: 1px solid #555; margin-right: 10px; transition: 0.2s;">☆ Favorite</button>
             <button id="inspectToggleBtn" class="inspect-btn" onclick="toggleInspector()">👁️ Inspect Faces</button>
             <div class="autocomplete-wrapper" style="overflow: visible;">
                 <input type="text" id="lightboxTagInput" placeholder="Tag whole photo..." autocomplete="off">
@@ -314,10 +330,15 @@ HTML_TEMPLATE = """
 
         const galleryData = [
             {% for item in results %}
-            { type: "{{ item.file_type }}", src: "/file?path={{ item.current_path | urlencode }}" }{% if not loop.last %},{% endif %}
+            { 
+                id: {{ item.id }}, 
+                type: "{{ item.file_type }}", 
+                src: "/file?path={{ item.current_path | urlencode }}", 
+                is_favorite: {{ item.is_favorite | default(0) }} 
+            }{% if not loop.last %},{% endif %}
             {% endfor %}
         ];
-        
+
         let isBatchMode = false;
         let selectedPaths = new Set();
         let currentIndex = 0;
@@ -417,6 +438,18 @@ HTML_TEMPLATE = """
             if (index < 0 || index >= galleryData.length || galleryData[index].type === 'document') return;
             currentIndex = index;
             const item = galleryData[currentIndex];
+
+            // Set the correct star state when opening the lightbox
+            const favBtn = document.getElementById('lightboxFavBtn');
+            if (item.is_favorite) {
+                favBtn.innerHTML = '★ Favorited';
+                favBtn.style.color = '#ffd700';
+                favBtn.style.borderColor = '#ffd700';
+            } else {
+                favBtn.innerHTML = '☆ Favorite';
+                favBtn.style.color = '#fff';
+                favBtn.style.borderColor = '#555';
+            }
             
             imgScale = 1; imgPointX = 0; imgPointY = 0; setImgTransform();
             
@@ -442,11 +475,65 @@ HTML_TEMPLATE = """
         function navigate(direction, event) {
             if (event) event.stopPropagation();
             let nextIndex = currentIndex + direction;
-            while (nextIndex >= 0 && nextIndex < galleryData.length && galleryData[nextIndex].type === 'document') nextIndex += direction;
-            if (nextIndex >= galleryData.length) nextIndex = 0;
-            if (nextIndex < 0) nextIndex = galleryData.length - 1;
+            
+            // Skip over documents
+            while (nextIndex >= 0 && nextIndex < galleryData.length && galleryData[nextIndex].type === 'document') {
+                nextIndex += direction;
+            }
+            
+            // Jinja templates inject the actual page numbers here
+            const currentPage = {{ page }};
+            const totalPages = {{ total_pages }};
+
+            // 1. Reached the end of the current page
+            if (nextIndex >= galleryData.length) {
+                if (currentPage < totalPages) {
+                    // Go to the next page and tell it to open the first image
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('page', currentPage + 1);
+                    url.searchParams.set('lightbox', 'first');
+                    window.location.href = url.toString();
+                }
+                return; // Stop if it's the last page
+            }
+            
+            // 2. Reached the beginning of the current page
+            if (nextIndex < 0) {
+                if (currentPage > 1) {
+                    // Go to the previous page and tell it to open the last image
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('page', currentPage - 1);
+                    url.searchParams.set('lightbox', 'last');
+                    window.location.href = url.toString();
+                }
+                return; // Stop if it's the first page
+            }
+            
             openLightbox(nextIndex);
         }
+
+        // 3. Automatically reopen the lightbox if we just navigated across pages
+        window.addEventListener('DOMContentLoaded', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const autoOpen = urlParams.get('lightbox');
+            
+            if (autoOpen === 'first') {
+                let idx = 0;
+                while(idx < galleryData.length && galleryData[idx].type === 'document') idx++;
+                if(idx < galleryData.length) openLightbox(idx);
+            } else if (autoOpen === 'last') {
+                let idx = galleryData.length - 1;
+                while(idx >= 0 && galleryData[idx].type === 'document') idx--;
+                if(idx >= 0) openLightbox(idx);
+            }
+            
+            // Clean up the URL so refreshing the browser doesn't trap you in the lightbox
+            if (autoOpen) {
+                urlParams.delete('lightbox');
+                const newUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
+                window.history.replaceState({}, '', newUrl);
+            }
+        });
 
         // --- FACE INSPECTOR & CUSTOM DRAWING ---
         let isDrawing = false;
@@ -511,10 +598,20 @@ HTML_TEMPLATE = """
             inspectorActive = !inspectorActive;
             const btn = document.getElementById('inspectToggleBtn');
             boxTagger.style.display = 'none';
+            const item = galleryData[currentIndex];
+            const urlParams = new URLSearchParams(item.src.split('?')[1]);
+
             if (!inspectorActive) { 
                 btn.classList.remove('active'); 
                 faceOverlay.style.display = 'none'; 
                 faceOverlay.style.pointerEvents = 'none';
+                
+                // If it's a video, switch the thumbnail back to the actual video player
+                if (item.type === 'video') {
+                    modalImg.style.display = 'none';
+                    modalVid.style.display = 'block';
+                    modalVid.play();
+                }
                 return; 
             }
             
@@ -524,22 +621,44 @@ HTML_TEMPLATE = """
             faceOverlay.style.display = 'block'; 
             faceOverlay.style.pointerEvents = 'auto'; 
             faceOverlay.style.cursor = 'crosshair';
+
+            // If it's a video, PAUSE IT and SHOW THE THUMBNAIL for accurate ML tagging
+            if (item.type === 'video') {
+                modalVid.pause();
+                modalVid.style.display = 'none';
+                modalImg.src = `/thumbnail?path=${encodeURIComponent(urlParams.get('path'))}&type=video`;
+                modalImg.style.display = 'block';
+            }
             
             faceOverlay.innerHTML = '<div style="position:absolute; top:20px; left:50%; transform:translateX(-50%); background:rgba(0,191,255,0.9); color:#000; font-weight:bold; padding:8px 15px; border-radius:20px; font-size:14px; pointer-events:none; z-index:1000; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">✏️ Click & Drag to manually select a missing face</div>';
 
-            if(galleryData[currentIndex].type !== 'image') { alert("Inspector supports Images only."); toggleInspector(); return; }
-
-            const urlParams = new URLSearchParams(galleryData[currentIndex].src.split('?')[1]);
             try {
                 const res = await fetch(`/api/get_faces?path=${encodeURIComponent(urlParams.get('path'))}`);
                 const data = await res.json();
                 
                 const thumbW = data.thumb_w;
                 const thumbH = data.thumb_h;
+                
+                // Setup container for Whole Image Tags (tags without boxes)
+                let hasGeneralTags = false;
+                const generalTagsContainer = document.createElement('div');
+                generalTagsContainer.className = 'general-tags-container';
+                generalTagsContainer.innerHTML = '<strong style="color:white;">Whole Image Tags:</strong>';
 
                 data.faces.forEach(face => {
-                    if(face.box_top === null || face.box_top === undefined) return;
+                    // IF THERE IS NO BOUNDING BOX (General Image Tag)
+                    if(face.box_top === null || face.box_top === undefined) {
+                        if (face.person_name) {
+                            hasGeneralTags = true;
+                            const tagPill = document.createElement('span');
+                            tagPill.className = 'tag-pill';
+                            tagPill.innerHTML = `${face.person_name} <span class="remove-tag" onclick="removeFaceTag(${face.id}, this.parentElement, event)">×</span>`;
+                            generalTagsContainer.appendChild(tagPill);
+                        }
+                        return;
+                    }
                     
+                    // OTHERWISE, RENDER THE BOUNDING BOX
                     const topPct = (face.box_top / thumbH) * 100; 
                     const leftPct = (face.box_left / thumbW) * 100;
                     const widthPct = ((face.box_right - face.box_left) / thumbW) * 100; 
@@ -554,23 +673,22 @@ HTML_TEMPLATE = """
                         const label = document.createElement('div'); label.className = 'box-label'; label.innerText = face.person_name; box.appendChild(label);
                     }
                     
+                    // Box Delete Button
                     const deleteBtn = document.createElement('div');
                     deleteBtn.className = 'delete-box-btn';
                     deleteBtn.innerText = '×';
                     deleteBtn.title = 'Remove this face box';
-                    deleteBtn.addEventListener('click', async (e) => {
-                        e.stopPropagation();
-                        const delRes = await fetch('/api/delete_face', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ face_id: face.id })
-                        });
-                        if(delRes.ok) box.remove();
-                    });
+                    deleteBtn.addEventListener('click', (e) => { removeFaceTag(face.id, box, e); });
                     box.appendChild(deleteBtn);
 
                     box.addEventListener('click', (e) => { e.stopPropagation(); openBoxTagger(face.id, face.person_name, e.clientX, e.clientY); });
                     faceOverlay.appendChild(box);
                 });
+                
+                if(hasGeneralTags) {
+                    faceOverlay.appendChild(generalTagsContainer);
+                }
+                
             } catch(e) { console.error("Error fetching faces", e); }
         }
 
@@ -609,6 +727,39 @@ HTML_TEMPLATE = """
                     if(res.ok) { boxTagger.style.display = 'none'; btn.innerText = 'Save Face'; customBoxData = null; inspectorActive = false; toggleInspector(); }
                 }
             } catch(e) { btn.innerText = 'Error'; }
+        }
+
+        async function toggleFavorite(mediaId, currentStatus, buttonElement) {
+            const newStatus = currentStatus ? 0 : 1;
+            
+            const response = await fetch('/api/toggle_favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ media_id: mediaId, is_favorite: newStatus })
+            });
+
+            if (response.ok) {
+                // Toggle UI styling instantly
+                buttonElement.innerHTML = newStatus ? "★" : "☆";
+                buttonElement.classList.toggle("favorited", newStatus === 1);
+                // Update the onclick handler dynamically so the *next* click works too
+                buttonElement.setAttribute('onclick', `event.stopPropagation(); toggleFavorite(${mediaId}, ${newStatus}, this)`);
+            }
+        }
+
+        async function removeFaceTag(faceId, rowElement, event) {
+            if(event) event.stopPropagation();
+            if (!confirm("Remove this tag?")) return;
+
+            const response = await fetch('/api/delete_face', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ face_id: faceId })
+            });
+
+            if (response.ok) {
+                rowElement.remove(); 
+            }
         }
 
         async function submitTag(isBatch) {
@@ -707,6 +858,36 @@ HTML_TEMPLATE = """
                 else if (event.key === "ArrowLeft") navigate(-1, null);
             }
         });
+
+        async function toggleLightboxFavorite() {
+            const item = galleryData[currentIndex];
+            const newStatus = item.is_favorite ? 0 : 1;
+            
+            const response = await fetch('/api/toggle_favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ media_id: item.id, is_favorite: newStatus })
+            });
+
+            if (response.ok) {
+                // 1. Update local state
+                item.is_favorite = newStatus; 
+                
+                // 2. Update the Lightbox button visually
+                const favBtn = document.getElementById('lightboxFavBtn');
+                favBtn.innerHTML = newStatus ? '★ Favorited' : '☆ Favorite';
+                favBtn.style.color = newStatus ? '#ffd700' : '#fff';
+                favBtn.style.borderColor = newStatus ? '#ffd700' : '#555';
+                
+                // 3. Sync the star on the background grid card!
+                const cardFavBtn = document.querySelector(`#card-${currentIndex} .favorite-btn`);
+                if (cardFavBtn) {
+                    cardFavBtn.innerHTML = newStatus ? "★" : "☆";
+                    cardFavBtn.classList.toggle("favorited", newStatus === 1);
+                    cardFavBtn.setAttribute('onclick', `event.stopPropagation(); toggleFavorite(${item.id}, ${newStatus}, this)`);
+                }
+            }
+        }
     </script>
 </body>
 </html>
@@ -972,7 +1153,8 @@ def get_faces():
         except Exception as e:
             print(f"Live scan engine error: {e}")
 
-    faces = conn.execute("SELECT id, box_top, box_right, box_bottom, box_left, person_name FROM faces WHERE media_id = ? AND box_top IS NOT NULL", (media_id,)).fetchall()
+    # FIX: Fetch ALL faces for this media now, even the ones without bounding boxes
+    faces = conn.execute("SELECT id, box_top, box_right, box_bottom, box_left, person_name FROM faces WHERE media_id = ?", (media_id,)).fetchall()
     conn.close()
     
     return jsonify({
@@ -989,7 +1171,6 @@ def tag_specific_face():
     exclude_from_ml = 1 if data.get("exclude_from_ml") else 0
     if not face_id or not person_name: return jsonify({"error": "Missing data"}), 400
     conn = get_db_connection()
-    # STRIPS the -1 machine-guess flag when a human corrects a face
     conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = ?, cluster_id = NULL WHERE id = ?", (person_name.strip(), exclude_from_ml, face_id))
     conn.commit()
     conn.close()
@@ -1070,14 +1251,12 @@ def add_manual_tag():
         
         existing = conn.execute("SELECT id FROM faces WHERE media_id = ? AND person_name = ?", (media_id, person_clean)).fetchone()
         if existing:
-            # STRIPS the -1 flag on existing faces
             conn.execute("UPDATE faces SET exclude_from_ml = ?, cluster_id = NULL WHERE id = ?", (exclude_from_ml, existing[0]))
             continue
 
         if exclude_from_ml == 0:
             ml_faces = conn.execute("SELECT id FROM faces WHERE media_id = ? AND encoding IS NOT NULL", (media_id,)).fetchall()
             if len(ml_faces) == 1:
-                # STRIPS the -1 flag when tagging a known ML face
                 conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = 0, cluster_id = NULL WHERE id = ?", (person_clean, ml_faces[0][0]))
             else:
                 conn.execute("INSERT INTO faces (media_id, person_name, exclude_from_ml) VALUES (?, ?, ?)", (media_id, person_clean, exclude_from_ml))
@@ -1094,8 +1273,19 @@ def name_cluster():
     if data.get("cluster_id") is None or not data.get("person_name"): 
         return jsonify({"error": "Invalid data"}), 400
     conn = get_db_connection()
-    # Converts an unknown inbox cluster into pure human anchors
     conn.execute("UPDATE faces SET person_name = ?, cluster_id = NULL WHERE cluster_id = ?", (data["person_name"].strip(), data["cluster_id"]))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
+
+@app.route("/api/toggle_favorite", methods=["POST"])
+def toggle_favorite():
+    data = request.json
+    media_id = data.get("media_id")
+    is_favorite = 1 if data.get("is_favorite") else 0
+    
+    conn = get_db_connection()
+    conn.execute("UPDATE media SET is_favorite = ? WHERE id = ?", (is_favorite, media_id))
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -1148,20 +1338,13 @@ def index():
     try: page = int(request.args.get("page", 1))
     except ValueError: page = 1
 
-    # Extract the requested quick view parameter
     view_param = request.args.get("view")
-    
-    # If the user is running a specific manual search, we don't want to force a default view
     is_searching = any(request.args.get(k) for k in ['person', 'start_date', 'end_date', 'camera', 'location', 'name'])
     
-    if not view_param and not is_searching:
-        current_view = "camera" # Default view behavior
-    elif not view_param:
-        current_view = "all"
-    else:
-        current_view = view_param
+    if not view_param and not is_searching: current_view = "camera" 
+    elif not view_param: current_view = "all"
+    else: current_view = view_param
 
-    # We removed source and file_type from the advanced form to declutter it
     start_date = request.args.get("start_date", "")
     end_date = request.args.get("end_date", "")
     camera = request.args.get("camera", "")
@@ -1179,19 +1362,23 @@ def index():
     conditions = ""
     params = []
     
-    # --- Apply Quick View Filters ---
+     # --- Apply Quick View Filters ---
+    if current_view != "documents":
+        conditions += " AND file_type != 'document'"
+
     if current_view == "camera":
-        conditions += " AND source = 'me' AND file_type IN ('image', 'video')"
+        conditions += " AND source = 'me'"
     elif current_view == "shared":
-        conditions += " AND source = 'shared' AND file_type IN ('image', 'video')"
+        conditions += " AND source = 'shared'"
     elif current_view == "whatsapp":
-        # Safe match for WhatsApp prefixes or original names containing 'WA'
-        conditions += " AND (original_name LIKE '%WA0%' OR original_name LIKE '%WhatsApp%') AND file_type IN ('image', 'video')"
+        conditions += " AND (original_name LIKE '%WA0%' OR original_name LIKE '%WhatsApp%')"
     elif current_view == "snapchat":
-        conditions += " AND original_name LIKE '%Snapchat%' AND file_type IN ('image', 'video')"
+        conditions += " AND original_name LIKE '%Snapchat%'"
     elif current_view == "documents":
         conditions += " AND file_type = 'document'"
-        
+    elif current_view == "favorites":
+        conditions += " AND is_favorite = 1"       
+
     # --- Apply Standard Manual Filters ---
     if person:
         if person.startswith("cluster:"):
@@ -1216,10 +1403,11 @@ def index():
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
     
+    # FIX: Added `is_favorite` to the main selection query so the UI can correctly render stars
     data_query = f"""
         SELECT 
             media.id, media.original_name, media.current_path, media.file_type, media.source, 
-            media.date_taken, media.camera_model, media.file_size_kb, media.location_name,
+            media.date_taken, media.camera_model, media.file_size_kb, media.location_name, media.is_favorite,
             (SELECT GROUP_CONCAT(DISTINCT person_name) FROM faces WHERE media_id = media.id AND person_name IS NOT NULL) AS people
         FROM media WHERE 1=1 {conditions} ORDER BY {order_by_clause} LIMIT {per_page} OFFSET ?
     """
@@ -1228,7 +1416,6 @@ def index():
     conn.close()
     
     return render_template_string(HTML_TEMPLATE, results=results, page=page, total_pages=total_pages, total_count=total_count, current_view=current_view)
-
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)

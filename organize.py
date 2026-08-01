@@ -43,6 +43,7 @@ GEO_CACHE = {}
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS media (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,10 +62,12 @@ def init_db():
             flash_fired INTEGER,
             latitude REAL,
             longitude REAL,
-            location_name TEXT
+            location_name TEXT,
+            file_hash TEXT,
+            is_favorite INTEGER DEFAULT 0  
         )
     """)
-    
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS faces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
