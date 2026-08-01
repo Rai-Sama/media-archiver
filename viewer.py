@@ -60,7 +60,7 @@ HTML_TEMPLATE = """
         .autocomplete-wrapper { position: relative; }
         .autocomplete-dropdown { position: absolute; top: 100%; left: 0; z-index: 999; width: max-content; min-width: 100%; max-width: 400px; max-height: 250px; overflow-y: auto; background-color: #2a2a2a; border: 1px solid #444; border-radius: 4px; box-shadow: 0 8px 16px rgba(0,0,0,0.8); display: none; margin-top: 4px; }
         .autocomplete-dropdown.drop-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
-        .autocomplete-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #333; word-break: break-all; color: #fff; font-size: 0.9em;}
+        .autocomplete-item { padding: 10px 15px; cursor: pointer; border-bottom: 1px solid #333; word-break: break-all; color: #fff; font-size: 0.9em; text-transform: capitalize; }
         .autocomplete-item:hover { background-color: #007bff; }
         
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 15px; }
@@ -81,8 +81,9 @@ HTML_TEMPLATE = """
         .play-icon { position: absolute; font-size: 3em; color: rgba(255, 255, 255, 0.7); pointer-events: none; }
 
         .info { padding: 12px; font-size: 0.85em; color: #ccc; line-height: 1.5; }
-        .badge { display: inline-block; padding: 2px 6px; background: #333; border-radius: 4px; font-size: 0.8em; margin-bottom: 6px; font-weight: bold; }
-
+        .badge { display: inline-block; padding: 2px 6px; background: #333; border-radius: 4px; font-size: 0.8em; margin-bottom: 6px; font-weight: bold; text-transform: capitalize; }
+        .badge-camera { text-transform: none; } /* Camera models shouldn't be capitalized */
+        
         .pagination { display: flex; justify-content: center; align-items: center; gap: 15px; margin-top: 30px; padding-bottom: 80px; }
         .page-btn { padding: 10px 20px; background: #2a2a2a; color: #fff; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-weight: bold; }
         .page-info { color: #aaa; font-size: 0.9em; font-family: monospace; }
@@ -108,7 +109,7 @@ HTML_TEMPLATE = """
         .face-box { position: absolute; border: 3px solid rgba(0, 191, 255, 0.8); border-radius: 4px; background: rgba(0, 191, 255, 0.1); cursor: pointer; pointer-events: auto; transition: 0.2s; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
         .face-box:hover { border-color: #00bfff; background: rgba(0, 191, 255, 0.3); z-index: 10; }
         .face-box.drawing { border: 3px dashed #d63384; background: rgba(214, 51, 132, 0.2); pointer-events: none; transition: none; }
-        .face-box .box-label { background: rgba(0, 0, 0, 0.8); color: white; font-size: 12px; padding: 2px 6px; border-radius: 4px; margin-bottom: -25px; white-space: nowrap; }
+        .face-box .box-label { background: rgba(0, 0, 0, 0.8); color: white; font-size: 12px; padding: 2px 6px; border-radius: 4px; margin-bottom: -25px; white-space: nowrap; text-transform: capitalize; }
         .face-box.tagged { border-color: rgba(40, 167, 69, 0.8); background: rgba(40, 167, 69, 0.1); }
         .face-box.tagged:hover { border-color: #28a745; background: rgba(40, 167, 69, 0.3); }
 
@@ -118,12 +119,12 @@ HTML_TEMPLATE = """
         .delete-box-btn:hover { background: #c82333; transform: scale(1.1); }
         
         .general-tags-container { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 10px 15px; border-radius: 8px; display: flex; gap: 10px; align-items: center; z-index: 1005; flex-wrap: wrap; max-width: 90%; pointer-events: auto; }
-        .tag-pill { background: #28a745; color: white; padding: 4px 10px; border-radius: 15px; font-size: 0.9em; display: flex; align-items: center; gap: 6px; font-weight: bold;}
+        .tag-pill { background: #28a745; color: white; padding: 4px 10px; border-radius: 15px; font-size: 0.9em; display: flex; align-items: center; gap: 6px; font-weight: bold; text-transform: capitalize;}
         .tag-pill .remove-tag { cursor: pointer; font-weight: bold; font-size: 1.1em; background: rgba(0,0,0,0.2); border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; }
         .tag-pill .remove-tag:hover { background: rgba(255,255,255,0.3); }
 
         #boxTagger { position: absolute; z-index: 1003; background: #1e1e1e; border: 1px solid #444; border-radius: 6px; padding: 10px; display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.8); }
-        #boxTagger input { background: #121212; border: 1px solid #555; color: white; padding: 6px 10px; border-radius: 4px; width: 150px; outline: none;}
+        #boxTagger input { background: #121212; border: 1px solid #555; color: white; padding: 6px 10px; border-radius: 4px; width: 150px; outline: none; text-transform: capitalize;}
         #boxTagger button { background: #007bff; padding: 6px 12px; height: auto; margin-top: 8px; width: 100%; border: none; border-radius: 4px; cursor: pointer; color: #fff; font-weight: bold;}
     </style>
 </head>
@@ -156,7 +157,7 @@ HTML_TEMPLATE = """
                 <div class="input-group">
                     <span class="filter-label">Person</span>
                     <div class="autocomplete-wrapper">
-                        <input type="text" id="personInput" name="person" placeholder="e.g., John, Jane" value="{{ request.args.get('person', '') }}" autocomplete="off" style="width: 180px; border-color: #00bfff;">
+                        <input type="text" id="personInput" name="person" placeholder="e.g., John, Jane" value="{{ request.args.get('person', '') }}" autocomplete="off" style="width: 180px; border-color: #00bfff; text-transform: capitalize;">
                         <div id="personDropdown" class="autocomplete-dropdown"></div>
                     </div>
                 </div>
@@ -238,7 +239,7 @@ HTML_TEMPLATE = """
                     {% endfor %}
                 {% endif %}
                 
-                {% if item.camera_model %}<div class="badge" style="background:#2b4b6f;">{{ item.camera_model[:15] }}</div>{% endif %}
+                {% if item.camera_model %}<div class="badge badge-camera" style="background:#2b4b6f;">{{ item.camera_model[:15] }}</div>{% endif %}
                 {% if item.location_name %}<div class="badge" style="background:#8b0000; color:#ffcccc;">📍 {{ item.location_name }}</div>{% endif %}
                 <br>
                 <strong style="color: #fff; word-break: break-all;">{{ item.original_name[:30] }}</strong><br>
@@ -276,7 +277,7 @@ HTML_TEMPLATE = """
             <button id="lightboxFavBtn" onclick="toggleLightboxFavorite()" style="background: #2a2a2a; border: 1px solid #555; margin-right: 10px; transition: 0.2s;">☆ Favorite</button>
             <button id="inspectToggleBtn" class="inspect-btn" onclick="toggleInspector()">👁️ Inspect Faces</button>
             <div class="autocomplete-wrapper" style="overflow: visible;">
-                <input type="text" id="lightboxTagInput" placeholder="Tag whole photo..." autocomplete="off">
+                <input type="text" id="lightboxTagInput" placeholder="Tag whole photo..." autocomplete="off" style="text-transform: capitalize;">
                 <div id="lightboxTagDropdown" class="autocomplete-dropdown drop-up"></div>
             </div>
             <label>
@@ -287,7 +288,7 @@ HTML_TEMPLATE = """
 
         <div id="boxTagger" onclick="event.stopPropagation();">
             <div class="autocomplete-wrapper" style="overflow: visible;">
-                <input type="text" id="boxTagInput" placeholder="Name this face..." autocomplete="off">
+                <input type="text" id="boxTagInput" placeholder="Name this face..." autocomplete="off" style="text-transform: capitalize;">
                 <div id="boxTagDropdown" class="autocomplete-dropdown drop-up"></div>
             </div>
             <label style="display:block; margin-top:8px; font-size:0.8em; color:#ccc; cursor:pointer;">
@@ -302,7 +303,7 @@ HTML_TEMPLATE = """
     <div id="batchTagBar" class="floating-tag-bar" style="display: none;">
         <span id="batchCount" style="color: #00bfff; font-weight: bold; width: 60px;">0 Selected</span>
         <div class="autocomplete-wrapper" style="overflow: visible;">
-            <input type="text" id="batchTagInput" placeholder="Tag selected photos..." autocomplete="off">
+            <input type="text" id="batchTagInput" placeholder="Tag selected photos..." autocomplete="off" style="text-transform: capitalize;">
             <div id="batchTagDropdown" class="autocomplete-dropdown drop-up"></div>
         </div>
         <label><input type="checkbox" id="batchExcludeCb"> Exclude from ML</label>
@@ -488,7 +489,6 @@ HTML_TEMPLATE = """
             // 1. Reached the end of the current page
             if (nextIndex >= galleryData.length) {
                 if (currentPage < totalPages) {
-                    // Go to the next page and tell it to open the first image
                     const url = new URL(window.location.href);
                     url.searchParams.set('page', currentPage + 1);
                     url.searchParams.set('lightbox', 'first');
@@ -500,7 +500,6 @@ HTML_TEMPLATE = """
             // 2. Reached the beginning of the current page
             if (nextIndex < 0) {
                 if (currentPage > 1) {
-                    // Go to the previous page and tell it to open the last image
                     const url = new URL(window.location.href);
                     url.searchParams.set('page', currentPage - 1);
                     url.searchParams.set('lightbox', 'last');
@@ -729,6 +728,36 @@ HTML_TEMPLATE = """
             } catch(e) { btn.innerText = 'Error'; }
         }
 
+        async function toggleLightboxFavorite() {
+            const item = galleryData[currentIndex];
+            const newStatus = item.is_favorite ? 0 : 1;
+            
+            const response = await fetch('/api/toggle_favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ media_id: item.id, is_favorite: newStatus })
+            });
+
+            if (response.ok) {
+                // 1. Update local state
+                item.is_favorite = newStatus; 
+                
+                // 2. Update the Lightbox button visually
+                const favBtn = document.getElementById('lightboxFavBtn');
+                favBtn.innerHTML = newStatus ? '★ Favorited' : '☆ Favorite';
+                favBtn.style.color = newStatus ? '#ffd700' : '#fff';
+                favBtn.style.borderColor = newStatus ? '#ffd700' : '#555';
+                
+                // 3. Sync the star on the background grid card!
+                const cardFavBtn = document.querySelector(`#card-${currentIndex} .favorite-btn`);
+                if (cardFavBtn) {
+                    cardFavBtn.innerHTML = newStatus ? "★" : "☆";
+                    cardFavBtn.classList.toggle("favorited", newStatus === 1);
+                    cardFavBtn.setAttribute('onclick', `event.stopPropagation(); toggleFavorite(${item.id}, ${newStatus}, this)`);
+                }
+            }
+        }
+
         async function toggleFavorite(mediaId, currentStatus, buttonElement) {
             const newStatus = currentStatus ? 0 : 1;
             
@@ -765,19 +794,19 @@ HTML_TEMPLATE = """
         async function submitTag(isBatch) {
             let name, excludeMl, paths, btnEl;
             if (isBatch) {
-                name = document.getElementById('batchTagInput').value.trim();
+                name = document.getElementById('batchTagInput').value;
                 excludeMl = document.getElementById('batchExcludeCb').checked;
                 paths = Array.from(selectedPaths);
                 btnEl = document.getElementById('batchTagBtn');
                 if (paths.length === 0) return;
             } else {
-                name = document.getElementById('lightboxTagInput').value.trim();
+                name = document.getElementById('lightboxTagInput').value;
                 excludeMl = document.getElementById('lightboxExcludeCb').checked;
                 const urlParams = new URLSearchParams(galleryData[currentIndex].src.split('?')[1]);
                 paths = [decodeURIComponent(urlParams.get('path'))];
                 btnEl = document.getElementById('lightboxTagBtn');
             }
-            if (!name) return;
+            if (!name.trim()) return;
             btnEl.innerText = 'Saving...';
             try {
                 const res = await fetch('/api/add_manual_tag', {
@@ -858,36 +887,6 @@ HTML_TEMPLATE = """
                 else if (event.key === "ArrowLeft") navigate(-1, null);
             }
         });
-
-        async function toggleLightboxFavorite() {
-            const item = galleryData[currentIndex];
-            const newStatus = item.is_favorite ? 0 : 1;
-            
-            const response = await fetch('/api/toggle_favorite', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ media_id: item.id, is_favorite: newStatus })
-            });
-
-            if (response.ok) {
-                // 1. Update local state
-                item.is_favorite = newStatus; 
-                
-                // 2. Update the Lightbox button visually
-                const favBtn = document.getElementById('lightboxFavBtn');
-                favBtn.innerHTML = newStatus ? '★ Favorited' : '☆ Favorite';
-                favBtn.style.color = newStatus ? '#ffd700' : '#fff';
-                favBtn.style.borderColor = newStatus ? '#ffd700' : '#555';
-                
-                // 3. Sync the star on the background grid card!
-                const cardFavBtn = document.querySelector(`#card-${currentIndex} .favorite-btn`);
-                if (cardFavBtn) {
-                    cardFavBtn.innerHTML = newStatus ? "★" : "☆";
-                    cardFavBtn.classList.toggle("favorited", newStatus === 1);
-                    cardFavBtn.setAttribute('onclick', `event.stopPropagation(); toggleFavorite(${item.id}, ${newStatus}, this)`);
-                }
-            }
-        }
     </script>
 </body>
 </html>
@@ -916,11 +915,11 @@ PEOPLE_HTML_TEMPLATE = """
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
         .person-card { background: #1e1e1e; border-radius: 8px; overflow: hidden; border: 1px solid #333; text-align: center; padding-bottom: 15px; }
         .person-card img { width: 100%; height: 200px; object-fit: cover; }
-        .person-card h3 { margin: 10px 0 5px 0; font-size: 1.1em; color: #fff; }
+        .person-card h3 { margin: 10px 0 5px 0; font-size: 1.1em; color: #fff; text-transform: capitalize; }
         .person-card p { margin: 0 0 10px 0; font-size: 0.85em; color: #888; }
         
         .name-input-group { display: flex; padding: 0 10px; gap: 8px; width: 100%; box-sizing: border-box; }
-        .name-input-group input { flex-grow: 1; padding: 8px; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; outline: none; min-width: 0; }
+        .name-input-group input { flex-grow: 1; padding: 8px; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; outline: none; min-width: 0; text-transform: capitalize; }
         .name-input-group button { flex-shrink: 0; padding: 8px 15px; background: #28a745; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; height: auto; }
         .name-input-group button:hover { background: #218838; }
         
@@ -1062,7 +1061,8 @@ def api_suggest_person():
     query_str = request.args.get("q", "")
     conn = get_db_connection()
     if query_str:
-        res = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name LIKE ? ORDER BY person_name LIMIT 50", (f"%{query_str}%",)).fetchall()
+        # Lowercase the query_str to match standardized DB
+        res = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name LIKE ? ORDER BY person_name LIMIT 50", (f"%{query_str.lower()}%",)).fetchall()
     else:
         res = conn.execute("SELECT DISTINCT person_name FROM faces WHERE person_name IS NOT NULL ORDER BY person_name LIMIT 50").fetchall()
     conn.close()
@@ -1153,7 +1153,6 @@ def get_faces():
         except Exception as e:
             print(f"Live scan engine error: {e}")
 
-    # FIX: Fetch ALL faces for this media now, even the ones without bounding boxes
     faces = conn.execute("SELECT id, box_top, box_right, box_bottom, box_left, person_name FROM faces WHERE media_id = ?", (media_id,)).fetchall()
     conn.close()
     
@@ -1170,8 +1169,10 @@ def tag_specific_face():
     person_name = data.get("person_name")
     exclude_from_ml = 1 if data.get("exclude_from_ml") else 0
     if not face_id or not person_name: return jsonify({"error": "Missing data"}), 400
+    
     conn = get_db_connection()
-    conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = ?, cluster_id = NULL WHERE id = ?", (person_name.strip(), exclude_from_ml, face_id))
+    # FORCE LOWERCASE
+    conn.execute("UPDATE faces SET person_name = ?, exclude_from_ml = ?, cluster_id = NULL WHERE id = ?", (person_name.strip().lower(), exclude_from_ml, face_id))
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -1225,10 +1226,11 @@ def add_custom_face():
         except Exception as e:
             exclude_from_ml = 1 
 
+    # FORCE LOWERCASE
     conn.execute("""
         INSERT INTO faces (media_id, person_name, exclude_from_ml, box_top, box_right, box_bottom, box_left, encoding) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (media_id, person_name.strip(), exclude_from_ml, top, right, bottom, left, encoding_blob))
+    """, (media_id, person_name.strip().lower(), exclude_from_ml, top, right, bottom, left, encoding_blob))
     
     conn.commit()
     conn.close()
@@ -1247,7 +1249,8 @@ def add_manual_tag():
         media_row = conn.execute("SELECT id FROM media WHERE current_path = ?", (file_path,)).fetchone()
         if not media_row: continue
         media_id = media_row[0]
-        person_clean = person_name.strip()
+        # FORCE LOWERCASE
+        person_clean = person_name.strip().lower()
         
         existing = conn.execute("SELECT id FROM faces WHERE media_id = ? AND person_name = ?", (media_id, person_clean)).fetchone()
         if existing:
@@ -1273,7 +1276,8 @@ def name_cluster():
     if data.get("cluster_id") is None or not data.get("person_name"): 
         return jsonify({"error": "Invalid data"}), 400
     conn = get_db_connection()
-    conn.execute("UPDATE faces SET person_name = ?, cluster_id = NULL WHERE cluster_id = ?", (data["person_name"].strip(), data["cluster_id"]))
+    # FORCE LOWERCASE
+    conn.execute("UPDATE faces SET person_name = ?, cluster_id = NULL WHERE cluster_id = ?", (data["person_name"].strip().lower(), data["cluster_id"]))
     conn.commit()
     conn.close()
     return jsonify({"success": True})
@@ -1385,7 +1389,8 @@ def index():
             conditions += " AND media.id IN (SELECT media_id FROM faces WHERE cluster_id = ?)"
             params.append(int(person.split(":")[1]))
         else:
-            for p in [p.strip() for p in person.split(",") if p.strip()]:
+            # Force search inputs to lower case as well to match the database
+            for p in [p.strip().lower() for p in person.split(",") if p.strip()]:
                 conditions += " AND media.id IN (SELECT media_id FROM faces WHERE person_name LIKE ?)"
                 params.append(f"%{p}%")
 
@@ -1403,7 +1408,6 @@ def index():
     page = max(1, min(page, total_pages))
     offset = (page - 1) * per_page
     
-    # FIX: Added `is_favorite` to the main selection query so the UI can correctly render stars
     data_query = f"""
         SELECT 
             media.id, media.original_name, media.current_path, media.file_type, media.source, 
